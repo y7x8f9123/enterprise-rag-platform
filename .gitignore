@@ -1,0 +1,31 @@
+
+# Node.js
+node_modules/
+dist/
+frontend/.env
+frontend/.env.*
+
+# Java / Maven
+target/
+backend/uploads/
+backend/test.txt
+backend/long-test.txt
+*.class
+
+# Python
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+ai-service/data/
+ai-service/.env
+ai-service/.env.*
+
+# IDE / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
