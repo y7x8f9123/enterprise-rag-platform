@@ -61,10 +61,10 @@ public class DocumentController {
         }
 
         if (file.getSize() > MAX_FILE_SIZE) {
-            throw new ResponseStatusException(
-                    HttpStatus.PAYLOAD_TOO_LARGE,
-                    "File exceeds 20 MB"
-            );
+                throw new ResponseStatusException(
+                        HttpStatus.CONTENT_TOO_LARGE,
+                        "File exceeds 20 MB"
+                );
         }
 
         String original = file.getOriginalFilename();
