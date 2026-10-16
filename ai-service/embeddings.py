@@ -1,14 +1,19 @@
 
 from functools import lru_cache
+from typing import TYPE_CHECKING
 
 import numpy as np
-from sentence_transformers import SentenceTransformer
+
+if TYPE_CHECKING:
+    from sentence_transformers import SentenceTransformer
 
 MODEL_NAME = "BAAI/bge-small-en-v1.5"
 
 
 @lru_cache(maxsize=1)
-def get_model() -> SentenceTransformer:
+def get_model() -> "SentenceTransformer":
+    from sentence_transformers import SentenceTransformer
+
     print(f"Loading embedding model: {MODEL_NAME}")
 
     return SentenceTransformer(

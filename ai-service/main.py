@@ -1,20 +1,16 @@
-
+from contextlib import asynccontextmanager
 from io import BytesIO
 from pathlib import Path
 from uuid import uuid4
 
-from fastapi import FastAPI, File, HTTPException, UploadFile
-from pydantic import BaseModel
-from pypdf import PdfReader
 from docx import Document
+from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
+from fastapi.concurrency import run_in_threadpool
+from pydantic import BaseModel, Field
+from pypdf import PdfReader
 
 from chunking import split_text
-
-app = FastAPI(
-    title="EnterpriseMind AI Service",
-    description="Document processing and RAG service",
-    version="0.3.0",
-)
+from vector_store import VectorStore
 
 MAX_FILE_SIZE = 20 * 1024 * 1024
 ALLOWED_EXTENSIONS = {".pdf", ".docx", ".txt"}
@@ -36,6 +32,63 @@ class DocumentResponse(BaseModel):
     document_id: str
     chunk_count: int
     chunks: list[dict]
+
+
+class IndexResponse(BaseModel):
+    status: str
+    document_id: str
+    filename: str
+    file_type: str
+    size_bytes: int
+    characters: int
+    words: int
+    chunk_count: int
+    indexed_chunks: int
+
+
+class SearchRequest(BaseModel):
+    query: str = Field(min_length=1, max_length=10_000)
+    limit: int = Field(default=5, ge=1, le=100)
+
+
+class SearchResult(BaseModel):
+    score: float
+    document_id: str
+    filename: str
+    chunk_index: int
+    content: str
+    start_char: int
+    end_char: int
+
+
+class SearchResponse(BaseModel):
+    query: str
+    count: int
+    results: list[SearchResult]
+
+
+@asynccontextmanager
+async def lifespan(application: FastAPI):
+    # One client owns the Qdrant Local directory for the whole process. Qdrant
+    # rejects a second process using the same directory; run uvicorn with one
+    # worker, or use Qdrant Server when multi-process access is required.
+    store = VectorStore()
+    application.state.vector_store = store
+    try:
+        yield
+    finally:
+        store.close()
+
+
+app = FastAPI(
+    title="EnterpriseMind AI Service",
+    description=(
+        "Document processing and local RAG service. Local development only; "
+        "do not expose this unauthenticated service to a public network."
+    ),
+    version="0.4.0",
+    lifespan=lifespan,
+)
 
 
 @app.get("/api/health", response_model=HealthResponse)
@@ -68,19 +121,15 @@ def extract_text(filename: str, content: bytes) -> str:
                     detail="Encrypted PDFs are not supported",
                 )
 
-            pages = [
-                page.extract_text() or ""
-                for page in reader.pages
-            ]
+            pages = [page.extract_text() or "" for page in reader.pages]
             return "\n\n".join(pages)
 
         if extension == ".docx":
             document = Document(BytesIO(content))
-
             paragraphs = [
-                p.text
-                for p in document.paragraphs
-                if p.text.strip()
+                paragraph.text
+                for paragraph in document.paragraphs
+                if paragraph.text.strip()
             ]
 
             for table in document.tables:
@@ -104,15 +153,12 @@ def extract_text(filename: str, content: bytes) -> str:
     )
 
 
-@app.post(
-    "/api/documents/parse",
-    response_model=DocumentResponse,
-)
-async def parse_document(file: UploadFile = File(...)):
-    filename = file.filename or ""
+async def read_and_validate_upload(file: UploadFile) -> tuple[str, str, bytes]:
+    filename = (file.filename or "").replace("\\", "/").rsplit("/", 1)[-1]
     extension = Path(filename).suffix.lower()
 
     if extension not in ALLOWED_EXTENSIONS:
+        await file.close()
         raise HTTPException(
             status_code=415,
             detail="Only PDF, DOCX and TXT are supported",
@@ -122,32 +168,46 @@ async def parse_document(file: UploadFile = File(...)):
     await file.close()
 
     if not content:
-        raise HTTPException(
-            status_code=400,
-            detail="File is empty",
-        )
-
+        raise HTTPException(status_code=400, detail="File is empty")
     if len(content) > MAX_FILE_SIZE:
         raise HTTPException(
             status_code=413,
             detail="File exceeds 20 MB limit",
         )
 
-    text = extract_text(filename, content)
+    return filename, extension, content
 
+
+def parse_and_chunk(
+    filename: str,
+    content: bytes,
+    document_id: str,
+) -> tuple[str, list[dict]]:
+    text = extract_text(filename, content)
     if not text.strip():
         raise HTTPException(
             status_code=422,
             detail="No extractable text found",
         )
 
-    document_id = str(uuid4())
-
     chunks = split_text(
         text=text,
         document_id=document_id,
         chunk_size=500,
         chunk_overlap=100,
+    )
+    return text, chunks
+
+
+@app.post("/api/documents/parse", response_model=DocumentResponse)
+async def parse_document(file: UploadFile = File(...)):
+    filename, extension, content = await read_and_validate_upload(file)
+    document_id = str(uuid4())
+    text, chunks = await run_in_threadpool(
+        parse_and_chunk,
+        filename,
+        content,
+        document_id,
     )
 
     return DocumentResponse(
@@ -161,4 +221,87 @@ async def parse_document(file: UploadFile = File(...)):
         document_id=document_id,
         chunk_count=len(chunks),
         chunks=chunks,
+    )
+
+
+@app.post("/api/documents/index", response_model=IndexResponse)
+async def index_document(
+    request: Request,
+    file: UploadFile = File(...),
+    document_id: str | None = Form(default=None),
+):
+    filename, extension, content = await read_and_validate_upload(file)
+    resolved_id = (
+        str(uuid4()) if document_id is None else document_id.strip()
+    )
+    if not resolved_id:
+        raise HTTPException(
+            status_code=422,
+            detail="document_id cannot be blank",
+        )
+    if len(resolved_id) > 200:
+        raise HTTPException(
+            status_code=422,
+            detail="document_id cannot exceed 200 characters",
+        )
+
+    text, chunks = await run_in_threadpool(
+        parse_and_chunk,
+        filename,
+        content,
+        resolved_id,
+    )
+
+    try:
+        indexed = await run_in_threadpool(
+            request.app.state.vector_store.replace_document,
+            resolved_id,
+            filename,
+            chunks,
+        )
+    except ValueError as exception:
+        raise HTTPException(status_code=422, detail=str(exception))
+    except Exception as exception:
+        raise HTTPException(
+            status_code=503,
+            detail="Document indexing failed; the previous index was preserved when possible",
+        ) from exception
+
+    return IndexResponse(
+        status="INDEXED",
+        document_id=resolved_id,
+        filename=filename,
+        file_type=extension.lstrip("."),
+        size_bytes=len(content),
+        characters=len(text),
+        words=len(text.split()),
+        chunk_count=len(chunks),
+        indexed_chunks=indexed,
+    )
+
+
+@app.post("/api/search", response_model=SearchResponse)
+async def search_documents(body: SearchRequest, request: Request):
+    query = body.query.strip()
+    if not query:
+        raise HTTPException(status_code=422, detail="query cannot be blank")
+
+    try:
+        results = await run_in_threadpool(
+            request.app.state.vector_store.search,
+            query,
+            body.limit,
+        )
+    except ValueError as exception:
+        raise HTTPException(status_code=422, detail=str(exception))
+    except Exception as exception:
+        raise HTTPException(
+            status_code=503,
+            detail="Search is temporarily unavailable",
+        ) from exception
+
+    return SearchResponse(
+        query=query,
+        count=len(results),
+        results=results,
     )
