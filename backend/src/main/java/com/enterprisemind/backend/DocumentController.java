@@ -4,7 +4,7 @@ package com.enterprisemind.backend;
 import java.io.IOException;
 import java.io.InputStream;
 import java.nio.file.*;
-import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
@@ -13,6 +13,8 @@ import java.util.UUID;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.web.bind.annotation.*;
 import org.springframework.web.multipart.MultipartFile;
 import org.springframework.web.server.ResponseStatusException;
@@ -20,6 +22,9 @@ import org.springframework.web.server.ResponseStatusException;
 @RestController
 @RequestMapping("/api/documents")
 public class DocumentController {
+
+    private static final Logger LOGGER =
+            LoggerFactory.getLogger(DocumentController.class);
 
     private static final Set<String> ALLOWED =
             Set.of("pdf", "docx", "txt");
@@ -99,33 +104,42 @@ public class DocumentController {
             Files.copy(input, target);
         }
 
-        Map<String, Object> result = new HashMap<>();
+        Map<String, Object> result = new LinkedHashMap<>();
 
         result.put("id", storedName);
+        result.put("documentId", storedName);
         result.put("originalName", safeName);
         result.put("size", file.getSize());
         result.put("status", "STORED");
+        result.put("indexingStatus", "INDEX_FAILED");
+        result.put("characters", null);
+        result.put("words", null);
+        result.put("chunkCount", null);
+        result.put("indexedChunks", null);
 
         try {
             byte[] content = Files.readAllBytes(target);
 
-            Map<?, ?> parsed = parsingService.parse(
+            DocumentIndexResult indexed = parsingService.index(
                     safeName,
-                    content
+                    content,
+                    storedName
             );
 
-            result.put("parsingStatus", "PARSED");
-            result.put("characters", parsed.get("characters"));
-            result.put("words", parsed.get("words"));
+            result.put("indexingStatus", "INDEXED");
+            result.put("characters", indexed.characters());
+            result.put("words", indexed.words());
+            result.put("chunkCount", indexed.chunkCount());
+            result.put("indexedChunks", indexed.indexedChunks());
 
         } catch (Exception exception) {
-            result.put("parsingStatus", "FAILED");
-            result.put("parsingError",
-                    "Document parsing failed or AI service unavailable");
+            result.put("indexingError",
+                    "Document was stored but indexing failed");
 
-            System.err.println(
-                    "Parsing failed for " + storedName
-                    + ": " + exception.getMessage()
+            LOGGER.warn(
+                    "AI indexing failed for documentId={} cause={}",
+                    storedName,
+                    exception.getClass().getSimpleName()
             );
         }
 

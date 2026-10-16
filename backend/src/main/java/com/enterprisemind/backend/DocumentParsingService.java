@@ -1,7 +1,6 @@
-
 package com.enterprisemind.backend;
 
-import java.util.Map;
+import java.time.Duration;
 
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.core.io.ByteArrayResource;
@@ -19,13 +18,27 @@ public class DocumentParsingService {
 
     public DocumentParsingService(
             @Value("${app.ai-service.url:http://127.0.0.1:8000}")
-            String aiServiceUrl
+            String aiServiceUrl,
+            @Value("${app.ai-service.connect-timeout-ms:5000}")
+            int connectTimeoutMs,
+            @Value("${app.ai-service.read-timeout-ms:180000}")
+            int readTimeoutMs
     ) {
+        if (connectTimeoutMs <= 0 || readTimeoutMs <= 0) {
+            throw new IllegalArgumentException(
+                    "AI service timeouts must be positive"
+            );
+        }
+
         SimpleClientHttpRequestFactory factory =
                 new SimpleClientHttpRequestFactory();
 
-        factory.setConnectTimeout(5000);
-        factory.setReadTimeout(30000);
+        factory.setConnectTimeout(
+                Duration.ofMillis(connectTimeoutMs)
+        );
+        factory.setReadTimeout(
+                Duration.ofMillis(readTimeoutMs)
+        );
 
         this.restClient = RestClient.builder()
                 .baseUrl(aiServiceUrl)
@@ -33,10 +46,17 @@ public class DocumentParsingService {
                 .build();
     }
 
-    public Map<?, ?> parse(
+    public DocumentIndexResult index(
             String filename,
-            byte[] content
+            byte[] content,
+            String documentId
     ) {
+        if (documentId == null || documentId.isBlank()) {
+            throw new IllegalArgumentException(
+                    "documentId cannot be blank"
+            );
+        }
+
         ByteArrayResource resource =
                 new ByteArrayResource(content) {
                     @Override
@@ -49,21 +69,43 @@ public class DocumentParsingService {
                 new LinkedMultiValueMap<>();
 
         body.add("file", resource);
+        body.add("document_id", documentId);
 
-        Map<?, ?> response = restClient.post()
-                .uri("/api/documents/parse")
+        DocumentIndexResult response = restClient.post()
+                .uri("/api/documents/index")
                 .contentType(MediaType.MULTIPART_FORM_DATA)
                 .body(body)
                 .retrieve()
-                .body(Map.class);
+                .body(DocumentIndexResult.class);
 
+        validateResponse(response, documentId);
+        return response;
+    }
+
+    private static void validateResponse(
+            DocumentIndexResult response,
+            String expectedDocumentId
+    ) {
         if (response == null ||
-                !"PARSED".equals(response.get("status"))) {
+                !"INDEXED".equals(response.status())) {
             throw new IllegalStateException(
-                    "AI service did not confirm parsing"
+                    "AI service did not confirm indexing"
             );
         }
 
-        return response;
+        if (!expectedDocumentId.equals(response.documentId())) {
+            throw new IllegalStateException(
+                    "AI service returned a different document ID"
+            );
+        }
+
+        if (response.characters() < 0 || response.words() < 0 ||
+                response.chunkCount() < 0 ||
+                response.indexedChunks() < 0 ||
+                response.indexedChunks() != response.chunkCount()) {
+            throw new IllegalStateException(
+                    "AI service returned invalid indexing counts"
+            );
+        }
     }
 }
