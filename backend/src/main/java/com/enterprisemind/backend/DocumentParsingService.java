@@ -82,6 +82,27 @@ public class DocumentParsingService {
         return response;
     }
 
+    public void delete(String documentId) {
+        if (documentId == null || documentId.isBlank()) {
+            throw new IllegalArgumentException(
+                    "documentId cannot be blank"
+            );
+        }
+
+        DocumentDeleteResult response = restClient.delete()
+                .uri("/api/documents/{documentId}/index", documentId)
+                .retrieve()
+                .body(DocumentDeleteResult.class);
+
+        if (response == null ||
+                !"DELETED".equals(response.status()) ||
+                !documentId.equals(response.documentId())) {
+            throw new IllegalStateException(
+                    "AI service did not confirm vector deletion"
+            );
+        }
+    }
+
     private static void validateResponse(
             DocumentIndexResult response,
             String expectedDocumentId

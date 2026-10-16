@@ -114,6 +114,21 @@ class DocumentParsingServiceTest {
         );
     }
 
+    @Test
+    void deleteRequiresMatchingDeletedConfirmation() throws Exception {
+        startServer("/api/documents/spring-id.txt/index", exchange -> {
+            assertEquals("DELETE", exchange.getRequestMethod());
+            sendJson(exchange, 200, """
+                    {
+                      "status": "DELETED",
+                      "document_id": "spring-id.txt"
+                    }
+                    """);
+        });
+
+        createService().delete("spring-id.txt");
+    }
+
     private DocumentParsingService createService() {
         return new DocumentParsingService(
                 "http://127.0.0.1:" + server.getAddress().getPort(),
@@ -123,18 +138,25 @@ class DocumentParsingServiceTest {
     }
 
     private void startServer(ExchangeHandler handler) throws IOException {
+        startServer("/api/documents/index", exchange -> {
+            assertEquals("POST", exchange.getRequestMethod());
+            assertTrue(
+                    exchange.getRequestHeaders()
+                            .getFirst("Content-Type")
+                            .startsWith("multipart/form-data;")
+            );
+            handler.handle(exchange);
+        });
+    }
+
+    private void startServer(String path, ExchangeHandler handler)
+            throws IOException {
         server = HttpServer.create(
                 new InetSocketAddress("127.0.0.1", 0),
                 0
         );
-        server.createContext("/api/documents/index", exchange -> {
+        server.createContext(path, exchange -> {
             try {
-                assertEquals("POST", exchange.getRequestMethod());
-                assertTrue(
-                        exchange.getRequestHeaders()
-                                .getFirst("Content-Type")
-                                .startsWith("multipart/form-data;")
-                );
                 handler.handle(exchange);
             } finally {
                 exchange.close();

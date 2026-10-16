@@ -167,6 +167,25 @@ class VectorStoreTests(unittest.TestCase):
                 )
         self.assertEqual(self.store.count(), 0)
 
+    def test_delete_document_removes_only_matching_points(self):
+        self.store.replace_document(
+            "first.txt",
+            "first.txt",
+            split_text("first content", "first.txt"),
+        )
+        self.store.replace_document(
+            "second.txt",
+            "second.txt",
+            split_text("second content", "second.txt"),
+        )
+
+        self.store.delete_document("first.txt")
+
+        self.assertEqual(self.store.count(), 1)
+        results = self.store.search("content", 10)
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0]["document_id"], "second.txt")
+
 
 if __name__ == "__main__":
     unittest.main()

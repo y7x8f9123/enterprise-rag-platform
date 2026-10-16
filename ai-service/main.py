@@ -1,6 +1,7 @@
 from contextlib import asynccontextmanager
 from io import BytesIO
 from pathlib import Path
+import re
 from uuid import uuid4
 
 from docx import Document
@@ -14,6 +15,10 @@ from vector_store import VectorStore
 
 MAX_FILE_SIZE = 20 * 1024 * 1024
 ALLOWED_EXTENSIONS = {".pdf", ".docx", ".txt"}
+DOCUMENT_ID_PATTERN = re.compile(
+    r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-"
+    r"[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}\.(pdf|docx|txt)$"
+)
 
 
 class HealthResponse(BaseModel):
@@ -65,6 +70,11 @@ class SearchResponse(BaseModel):
     query: str
     count: int
     results: list[SearchResult]
+
+
+class DeleteResponse(BaseModel):
+    status: str
+    document_id: str
 
 
 @asynccontextmanager
@@ -304,4 +314,31 @@ async def search_documents(body: SearchRequest, request: Request):
         query=query,
         count=len(results),
         results=results,
+    )
+
+
+@app.delete(
+    "/api/documents/{document_id}/index",
+    response_model=DeleteResponse,
+)
+async def delete_document_index(document_id: str, request: Request):
+    if not DOCUMENT_ID_PATTERN.fullmatch(document_id):
+        raise HTTPException(status_code=422, detail="Invalid document_id")
+
+    try:
+        await run_in_threadpool(
+            request.app.state.vector_store.delete_document,
+            document_id,
+        )
+    except ValueError as exception:
+        raise HTTPException(status_code=422, detail=str(exception))
+    except Exception as exception:
+        raise HTTPException(
+            status_code=503,
+            detail="Vector deletion was not completed",
+        ) from exception
+
+    return DeleteResponse(
+        status="DELETED",
+        document_id=document_id,
     )

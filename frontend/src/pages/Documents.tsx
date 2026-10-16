@@ -1,4 +1,11 @@
-import { useRef, useState, type ChangeEvent, type DragEvent } from 'react'
+import {
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+  type ChangeEvent,
+  type DragEvent,
+} from 'react'
 import {
   AlertCircle,
   CheckCircle2,
@@ -14,6 +21,8 @@ import {
   X,
 } from 'lucide-react'
 import {
+  deleteDocument as deleteDocumentRequest,
+  listDocuments,
   uploadDocument as uploadDocumentRequest,
   type UploadDocumentResponse,
 } from '../api/client'
@@ -25,22 +34,25 @@ type UploadStatus =
   | 'index_failed'
   | 'failed'
 
-type LocalDocument = {
+type DisplayDocument = {
   id: string
-  file: File
   originalName: string
-  addedAt: Date
+  size: number
+  createdAt: Date
   status: UploadStatus
+  file?: File
   serverId?: string
   characters?: number | null
   words?: number | null
   chunkCount?: number | null
   indexedChunks?: number | null
   error?: string
+  deleting?: boolean
 }
 
 const allowedExtensions = ['pdf', 'docx', 'txt']
 const maxSize = 20 * 1024 * 1024
+const pageSize = 10
 
 const statusPresentation = {
   uploading: {
@@ -85,10 +97,25 @@ function statusFromResponse(response: UploadDocumentResponse): UploadStatus {
   return 'stored'
 }
 
+function fromResponse(response: UploadDocumentResponse): DisplayDocument {
+  return {
+    id: response.documentId,
+    serverId: response.documentId,
+    originalName: response.originalName,
+    size: response.size,
+    createdAt: new Date(response.createdAt),
+    status: statusFromResponse(response),
+    characters: response.characters,
+    words: response.words,
+    chunkCount: response.chunkCount,
+    indexedChunks: response.indexedChunks,
+    error: response.indexingError,
+  }
+}
+
 function DocumentStatus({ status }: { status: UploadStatus }) {
   const presentation = statusPresentation[status]
   const Icon = presentation.icon
-
   return (
     <span
       className={`inline-flex items-center gap-1.5 rounded-full px-3 py-1.5 text-xs font-semibold ring-1 ring-inset ${presentation.className}`}
@@ -103,52 +130,59 @@ function DocumentStatus({ status }: { status: UploadStatus }) {
 }
 
 export default function Documents() {
-  const [documents, setDocuments] = useState<LocalDocument[]>([])
+  const [documents, setDocuments] = useState<DisplayDocument[]>([])
   const [search, setSearch] = useState('')
+  const [page, setPage] = useState(0)
+  const [totalElements, setTotalElements] = useState(0)
+  const [totalPages, setTotalPages] = useState(0)
   const [error, setError] = useState('')
+  const [loading, setLoading] = useState(true)
   const [dragging, setDragging] = useState(false)
-
   const inputRef = useRef<HTMLInputElement>(null)
 
-  async function uploadDocument(document: LocalDocument) {
+  const loadDocuments = useCallback(async (requestedPage: number, query: string) => {
+    setLoading(true)
     try {
-      const result = await uploadDocumentRequest(document.file)
-      const finalStatus = statusFromResponse(result)
-
-      setDocuments(previous =>
-        previous.map(item =>
-          item.id === document.id
-            ? {
-                ...item,
-                originalName: result.originalName,
-                status: finalStatus,
-                serverId: result.documentId || result.id,
-                characters: result.characters,
-                words: result.words,
-                chunkCount: result.chunkCount,
-                indexedChunks: result.indexedChunks,
-                error:
-                  finalStatus === 'index_failed'
-                    ? result.indexingError ?? 'Vector indexing failed.'
-                    : undefined,
-              }
-            : item,
-        ),
-      )
+      const result = await listDocuments(query, requestedPage, pageSize)
+      setDocuments(result.documents.map(fromResponse))
+      setPage(result.page)
+      setTotalElements(result.totalElements)
+      setTotalPages(result.totalPages)
     } catch (requestError) {
-      const message =
+      setError(
         requestError instanceof Error
           ? requestError.message
-          : 'Unknown upload error'
+          : 'Unable to load documents.',
+      )
+    } finally {
+      setLoading(false)
+    }
+  }, [])
 
+  useEffect(() => {
+    const timer = window.setTimeout(() => {
+      void loadDocuments(0, search.trim())
+    }, 250)
+    return () => window.clearTimeout(timer)
+  }, [loadDocuments, search])
+
+  async function uploadDocument(document: DisplayDocument) {
+    if (!document.file) return
+    try {
+      const result = await uploadDocumentRequest(document.file)
+      setDocuments(previous =>
+        previous.map(item =>
+          item.id === document.id ? fromResponse(result) : item,
+        ),
+      )
+      setTotalElements(previous => previous + 1)
+    } catch (requestError) {
+      const message =
+        requestError instanceof Error ? requestError.message : 'Unknown upload error'
       setDocuments(previous =>
         previous.map(item =>
           item.id === document.id
-            ? {
-                ...item,
-                status: 'failed',
-                error: message,
-              }
+            ? { ...item, status: 'failed', error: message }
             : item,
         ),
       )
@@ -157,55 +191,37 @@ export default function Documents() {
 
   function addFiles(files: FileList | File[]) {
     setError('')
-
-    const accepted: LocalDocument[] = []
+    const accepted: DisplayDocument[] = []
     const rejected: string[] = []
 
     for (const file of Array.from(files)) {
       const extension = file.name.split('.').pop()?.toLowerCase()
-
       if (!extension || !allowedExtensions.includes(extension)) {
         rejected.push(`${file.name}: unsupported format`)
-        continue
-      }
-
-      if (file.size === 0) {
+      } else if (file.size === 0) {
         rejected.push(`${file.name}: file is empty`)
-        continue
-      }
-
-      if (file.size > maxSize) {
+      } else if (file.size > maxSize) {
         rejected.push(`${file.name}: exceeds 20 MB`)
-        continue
+      } else {
+        accepted.push({
+          id: crypto.randomUUID(),
+          file,
+          originalName: file.name,
+          size: file.size,
+          createdAt: new Date(),
+          status: 'uploading',
+        })
       }
-
-      accepted.push({
-        id: crypto.randomUUID(),
-        file,
-        originalName: file.name,
-        addedAt: new Date(),
-        status: 'uploading',
-      })
     }
 
-    if (rejected.length > 0) {
-      setError(rejected.join('; '))
-    }
-
+    if (rejected.length > 0) setError(rejected.join('; '))
     if (accepted.length === 0) return
-
-    setDocuments(previous => [...previous, ...accepted])
-
-    for (const document of accepted) {
-      void uploadDocument(document)
-    }
+    setDocuments(previous => [...accepted, ...previous])
+    for (const document of accepted) void uploadDocument(document)
   }
 
   function handleSelect(event: ChangeEvent<HTMLInputElement>) {
-    if (event.target.files) {
-      addFiles(event.target.files)
-    }
-
+    if (event.target.files) addFiles(event.target.files)
     event.target.value = ''
   }
 
@@ -215,107 +231,90 @@ export default function Documents() {
     addFiles(event.dataTransfer.files)
   }
 
-  function removeDocument(id: string) {
-    setDocuments(previous => previous.filter(item => item.id !== id))
+  async function removeDocument(document: DisplayDocument) {
+    if (!document.serverId) {
+      setDocuments(previous => previous.filter(item => item.id !== document.id))
+      return
+    }
+    if (!window.confirm(
+      `Permanently delete “${document.originalName}”, its stored file, and its vector index?`,
+    )) return
+
+    setDocuments(previous => previous.map(item =>
+      item.id === document.id ? { ...item, deleting: true } : item,
+    ))
+    try {
+      await deleteDocumentRequest(document.serverId)
+      setDocuments(previous => previous.filter(item => item.id !== document.id))
+      setTotalElements(previous => Math.max(0, previous - 1))
+      if (documents.length === 1 && page > 0) {
+        await loadDocuments(page - 1, search.trim())
+      }
+    } catch (requestError) {
+      setDocuments(previous => previous.map(item =>
+        item.id === document.id ? { ...item, deleting: false } : item,
+      ))
+      setError(
+        requestError instanceof Error
+          ? requestError.message
+          : 'Document deletion failed.',
+      )
+    }
   }
 
-  const normalizedSearch = search.trim().toLowerCase()
-  const filtered = documents.filter(document =>
-    document.originalName.toLowerCase().includes(normalizedSearch),
-  )
-
-  const indexedCount = documents.filter(
-    document => document.status === 'indexed',
-  ).length
-  const processingCount = documents.filter(
-    document => document.status === 'uploading',
-  ).length
+  const indexedCount = documents.filter(item => item.status === 'indexed').length
+  const processingCount = documents.filter(item => item.status === 'uploading').length
   const attentionCount = documents.filter(
-    document =>
-      document.status === 'index_failed' || document.status === 'failed',
+    item => item.status === 'index_failed' || item.status === 'failed',
   ).length
 
   return (
     <div className="space-y-6">
       <div>
-        <h2 className="text-2xl font-bold text-slate-900">
-          Document Management
-        </h2>
+        <h2 className="text-2xl font-bold text-slate-900">Document Management</h2>
         <p className="mt-1 text-sm text-slate-500">
-          Upload, index, and review documents in your local knowledge workspace.
+          Upload, index, search, and permanently manage your local knowledge files.
         </p>
       </div>
 
       <div className="flex items-start gap-3 rounded-xl border border-blue-200 bg-blue-50 p-4 text-sm text-blue-800">
         <Info size={20} className="shrink-0" />
         <p>
-          Development Mode: files are stored by your local Spring Boot service
-          and indexed by the local AI service. This list exists only in browser
-          memory and resets when the page is refreshed.
+          Development Mode: metadata and files persist locally. Deleting a
+          document removes its stored file, metadata, and Qdrant vectors.
         </p>
       </div>
 
-      <input
-        ref={inputRef}
-        type="file"
-        accept=".pdf,.docx,.txt"
-        multiple
-        className="hidden"
-        onChange={handleSelect}
-      />
+      <input ref={inputRef} type="file" accept=".pdf,.docx,.txt" multiple
+        className="hidden" onChange={handleSelect} />
 
       <div
-        onDragOver={event => {
-          event.preventDefault()
-          setDragging(true)
-        }}
+        onDragOver={event => { event.preventDefault(); setDragging(true) }}
         onDragLeave={event => {
-          if (!event.currentTarget.contains(event.relatedTarget as Node)) {
-            setDragging(false)
-          }
+          if (!event.currentTarget.contains(event.relatedTarget as Node)) setDragging(false)
         }}
         onDrop={handleDrop}
         className={`rounded-2xl border-2 border-dashed p-8 text-center transition-colors md:p-10 ${
-          dragging
-            ? 'border-indigo-500 bg-indigo-50'
-            : 'border-slate-300 bg-white'
+          dragging ? 'border-indigo-500 bg-indigo-50' : 'border-slate-300 bg-white'
         }`}
       >
         <UploadCloud size={42} className="mx-auto mb-4 text-indigo-600" />
-
-        <h3 className="text-lg font-semibold text-slate-900">
-          Upload Documents
-        </h3>
-
+        <h3 className="text-lg font-semibold text-slate-900">Upload Documents</h3>
         <p className="mt-2 text-sm text-slate-500">
           Drag and drop files here, or choose files from your computer.
         </p>
-
-        <button
-          type="button"
-          onClick={() => inputRef.current?.click()}
-          className="mt-5 rounded-lg bg-indigo-600 px-5 py-2.5 font-medium text-white transition-colors hover:bg-indigo-700"
-        >
+        <button type="button" onClick={() => inputRef.current?.click()}
+          className="mt-5 rounded-lg bg-indigo-600 px-5 py-2.5 font-medium text-white transition-colors hover:bg-indigo-700">
           Choose Files
         </button>
-
-        <p className="mt-4 text-xs text-slate-400">
-          PDF, DOCX, TXT · Maximum 20 MB per file
-        </p>
+        <p className="mt-4 text-xs text-slate-400">PDF, DOCX, TXT · Maximum 20 MB per file</p>
       </div>
 
       {error && (
-        <div
-          role="alert"
-          className="flex items-start gap-3 rounded-lg border border-red-200 bg-red-50 p-4 text-sm text-red-700"
-        >
+        <div role="alert" className="flex items-start gap-3 rounded-lg border border-red-200 bg-red-50 p-4 text-sm text-red-700">
           <AlertCircle size={19} className="shrink-0" />
           <span className="flex-1">{error}</span>
-          <button
-            type="button"
-            aria-label="Dismiss error"
-            onClick={() => setError('')}
-          >
+          <button type="button" aria-label="Dismiss error" onClick={() => setError('')}>
             <X size={18} />
           </button>
         </div>
@@ -324,124 +323,85 @@ export default function Documents() {
       <div className="rounded-xl border border-slate-200 bg-white shadow-sm">
         <div className="flex flex-col gap-4 border-b border-slate-200 p-5 lg:flex-row lg:items-center lg:justify-between">
           <div>
-            <h3 className="text-lg font-semibold text-slate-900">
-              Documents ({documents.length})
-            </h3>
+            <h3 className="text-lg font-semibold text-slate-900">Documents ({totalElements})</h3>
             <p className="mt-1 text-xs text-slate-500">
-              {indexedCount} indexed · {processingCount} processing ·{' '}
-              {attentionCount} need attention
+              On this page: {indexedCount} indexed · {processingCount} processing · {attentionCount} need attention
             </p>
           </div>
-
           <div className="flex items-center gap-2 rounded-lg border border-slate-200 px-3 py-2 focus-within:border-indigo-400 focus-within:ring-4 focus-within:ring-indigo-50">
             <Search size={17} className="text-slate-400" />
-            <input
-              value={search}
-              onChange={event => setSearch(event.target.value)}
-              placeholder="Filter this session…"
-              aria-label="Filter uploaded documents"
-              className="w-full bg-transparent text-sm outline-none sm:w-56"
-            />
+            <input value={search} onChange={event => setSearch(event.target.value)}
+              placeholder="Search stored filenames…" aria-label="Search stored documents"
+              className="w-full bg-transparent text-sm outline-none sm:w-56" />
           </div>
         </div>
 
-        {filtered.length === 0 ? (
+        {loading ? (
+          <div className="flex items-center justify-center gap-2 p-12 text-sm text-slate-500">
+            <LoaderCircle size={20} className="animate-spin" /> Loading documents…
+          </div>
+        ) : documents.length === 0 ? (
           <div className="p-12 text-center">
             <FileText size={36} className="mx-auto mb-3 text-slate-300" />
             <p className="font-medium text-slate-600">
-              {documents.length === 0
-                ? 'No documents uploaded this session'
-                : 'No matching documents'}
+              {search.trim() ? 'No matching documents' : 'No stored documents'}
             </p>
             <p className="mt-1 text-sm text-slate-400">
-              {documents.length === 0
-                ? 'Choose a file to start uploading and indexing.'
-                : 'Try another filename.'}
+              {search.trim() ? 'Try another filename.' : 'Choose a file to start uploading and indexing.'}
             </p>
           </div>
         ) : (
           <div className="divide-y divide-slate-100">
-            {filtered.map(document => (
+            {documents.map(document => (
               <article key={document.id} className="p-4 md:p-5">
                 <div className="flex flex-col gap-4 sm:flex-row sm:items-start">
                   <div className="flex min-w-0 flex-1 gap-3">
-                    <div className="h-fit rounded-lg bg-indigo-50 p-3 text-indigo-600">
-                      <File size={22} />
-                    </div>
-
+                    <div className="h-fit rounded-lg bg-indigo-50 p-3 text-indigo-600"><File size={22} /></div>
                     <div className="min-w-0 flex-1">
-                      <p className="truncate font-semibold text-slate-800">
-                        {document.originalName}
-                      </p>
-
+                      <p className="truncate font-semibold text-slate-800">{document.originalName}</p>
                       <p className="mt-1 text-xs text-slate-500">
-                        {formatSize(document.file.size)}
-                        {' · '}
-                        {document.addedAt.toLocaleString()}
+                        {formatSize(document.size)} · {document.createdAt.toLocaleString()}
                       </p>
-
                       {document.serverId && (
-                        <p className="mt-1 truncate font-mono text-[11px] text-slate-400">
-                          ID: {document.serverId}
-                        </p>
+                        <p className="mt-1 truncate font-mono text-[11px] text-slate-400">ID: {document.serverId}</p>
                       )}
-
                       {document.error && (
-                        <p
-                          className={`mt-2 text-xs ${
-                            document.status === 'index_failed'
-                              ? 'text-orange-700'
-                              : 'text-red-600'
-                          }`}
-                        >
+                        <p className={`mt-2 text-xs ${document.status === 'index_failed' ? 'text-orange-700' : 'text-red-600'}`}>
                           {document.error}
                         </p>
                       )}
                     </div>
                   </div>
-
                   <div className="flex items-center justify-between gap-2 sm:justify-end">
                     <DocumentStatus status={document.status} />
-                    <button
-                      type="button"
-                      aria-label={`Remove ${document.originalName} from this session list`}
-                      title="Remove from this browser list only"
-                      onClick={() => removeDocument(document.id)}
-                      className="rounded-lg p-2 text-slate-400 hover:bg-red-50 hover:text-red-600"
-                    >
-                      <Trash2 size={19} />
+                    <button type="button" disabled={document.deleting || document.status === 'uploading'}
+                      aria-label={`Delete ${document.originalName}`}
+                      title={document.serverId ? 'Permanently delete document' : 'Dismiss failed upload'}
+                      onClick={() => void removeDocument(document)}
+                      className="rounded-lg p-2 text-slate-400 hover:bg-red-50 hover:text-red-600 disabled:cursor-not-allowed disabled:opacity-50">
+                      {document.deleting ? <LoaderCircle size={19} className="animate-spin" /> : <Trash2 size={19} />}
                     </button>
                   </div>
                 </div>
 
-                {(document.characters !== undefined ||
-                  document.words !== undefined ||
-                  document.chunkCount !== undefined) && (
+                {(document.characters !== undefined || document.words !== undefined || document.chunkCount !== undefined) && (
                   <dl className="mt-4 grid grid-cols-2 gap-2 border-t border-slate-100 pt-4 text-xs sm:grid-cols-4">
-                    <div className="rounded-lg bg-slate-50 px-3 py-2">
-                      <dt className="text-slate-400">Characters</dt>
-                      <dd className="mt-1 font-semibold text-slate-700">
-                        {document.characters?.toLocaleString() ?? '—'}
-                      </dd>
-                    </div>
-                    <div className="rounded-lg bg-slate-50 px-3 py-2">
-                      <dt className="text-slate-400">Words</dt>
-                      <dd className="mt-1 font-semibold text-slate-700">
-                        {document.words?.toLocaleString() ?? '—'}
-                      </dd>
-                    </div>
-                    <div className="rounded-lg bg-slate-50 px-3 py-2">
-                      <dt className="text-slate-400">Chunks</dt>
-                      <dd className="mt-1 font-semibold text-slate-700">
-                        {document.chunkCount?.toLocaleString() ?? '—'}
-                      </dd>
-                    </div>
+                    {[
+                      ['Characters', document.characters],
+                      ['Words', document.words],
+                      ['Chunks', document.chunkCount],
+                    ].map(([label, value]) => (
+                      <div key={String(label)} className="rounded-lg bg-slate-50 px-3 py-2">
+                        <dt className="text-slate-400">{label}</dt>
+                        <dd className="mt-1 font-semibold text-slate-700">
+                          {typeof value === 'number' ? value.toLocaleString() : '—'}
+                        </dd>
+                      </div>
+                    ))}
                     <div className="rounded-lg bg-slate-50 px-3 py-2">
                       <dt className="text-slate-400">Indexed</dt>
                       <dd className="mt-1 flex items-center gap-1 font-semibold text-slate-700">
-                        {document.status === 'indexed' && (
-                          <CircleCheck size={13} className="text-emerald-600" />
-                        )}
+                        {document.status === 'indexed' && <CircleCheck size={13} className="text-emerald-600" />}
                         {document.indexedChunks?.toLocaleString() ?? '—'}
                       </dd>
                     </div>
@@ -451,12 +411,21 @@ export default function Documents() {
             ))}
           </div>
         )}
-      </div>
 
-      <p className="text-xs text-slate-400">
-        Removing an item only removes it from this in-memory browser list.
-        Files already stored on the server are not deleted.
-      </p>
+        {totalPages > 1 && (
+          <div className="flex items-center justify-between border-t border-slate-200 px-5 py-4 text-sm">
+            <span className="text-slate-500">Page {page + 1} of {totalPages}</span>
+            <div className="flex gap-2">
+              <button type="button" disabled={page === 0 || loading}
+                onClick={() => void loadDocuments(page - 1, search.trim())}
+                className="rounded-lg border border-slate-200 px-3 py-1.5 disabled:opacity-40">Previous</button>
+              <button type="button" disabled={page + 1 >= totalPages || loading}
+                onClick={() => void loadDocuments(page + 1, search.trim())}
+                className="rounded-lg border border-slate-200 px-3 py-1.5 disabled:opacity-40">Next</button>
+            </div>
+          </div>
+        )}
+      </div>
     </div>
   )
 }

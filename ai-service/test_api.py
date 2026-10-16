@@ -13,6 +13,7 @@ class FakeVectorStore:
         self.closed = False
         self.index_calls = []
         self.search_calls = []
+        self.delete_calls = []
         self.__class__.instances.append(self)
 
     def replace_document(self, document_id, filename, chunks):
@@ -30,6 +31,9 @@ class FakeVectorStore:
             "start_char": 0,
             "end_char": 47,
         }]
+
+    def delete_document(self, document_id):
+        self.delete_calls.append(document_id)
 
     def close(self):
         self.closed = True
@@ -117,6 +121,46 @@ class ApiTests(unittest.TestCase):
             json={"query": "   "},
         )
         self.assertEqual(response.status_code, 422)
+
+    def test_delete_document_index(self):
+        document_id = "550e8400-e29b-41d4-a716-446655440000.txt"
+        response = self.client.delete(
+            f"/api/documents/{document_id}/index"
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json(), {
+            "status": "DELETED",
+            "document_id": document_id,
+        })
+        self.assertEqual(
+            FakeVectorStore.instances[0].delete_calls,
+            [document_id],
+        )
+
+    def test_delete_rejects_path_like_document_id(self):
+        response = self.client.delete(
+            "/api/documents/not-a-valid-id.txt/index"
+        )
+        self.assertEqual(response.status_code, 422)
+
+    def test_delete_reports_vector_store_failure(self):
+        document_id = "550e8400-e29b-41d4-a716-446655440000.txt"
+        store = FakeVectorStore.instances[0]
+        with patch.object(
+            store,
+            "delete_document",
+            side_effect=RuntimeError("simulated failure"),
+        ):
+            response = self.client.delete(
+                f"/api/documents/{document_id}/index"
+            )
+
+        self.assertEqual(response.status_code, 503)
+        self.assertEqual(
+            response.json()["detail"],
+            "Vector deletion was not completed",
+        )
 
     def test_lifespan_closes_store(self):
         store = FakeVectorStore.instances[0]

@@ -3,221 +3,222 @@ package com.enterprisemind.backend;
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
-import static org.junit.jupiter.api.Assertions.assertNotNull;
-import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
-import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.doThrow;
+import static org.mockito.Mockito.reset;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.delete;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.multipart;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.util.Map;
+import java.util.UUID;
 
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
-import org.mockito.ArgumentCaptor;
-import org.springframework.http.HttpStatus;
-import org.springframework.http.ResponseEntity;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.boot.test.context.SpringBootTest;
+import org.springframework.boot.webmvc.test.autoconfigure.AutoConfigureMockMvc;
 import org.springframework.mock.web.MockMultipartFile;
+import org.springframework.test.context.DynamicPropertyRegistry;
+import org.springframework.test.context.DynamicPropertySource;
+import org.springframework.test.context.bean.override.mockito.MockitoBean;
+import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.web.client.ResourceAccessException;
 import org.springframework.web.server.ResponseStatusException;
 
+@SpringBootTest
+@AutoConfigureMockMvc
 class DocumentControllerTest {
 
+    private static final String DATABASE_NAME =
+            "documents-" + UUID.randomUUID();
+
     @TempDir
-    Path storageDirectory;
+    static Path storageDirectory;
 
-    @Test
-    void uploadStoresAndIndexesWithGeneratedDocumentId()
-            throws Exception {
-        byte[] content = "EnterpriseMind handbook".getBytes();
-        DocumentParsingService service =
-                mock(DocumentParsingService.class);
-
-        when(service.index(anyString(), any(byte[].class), anyString()))
-                .thenAnswer(invocation -> {
-                    String documentId = invocation.getArgument(2);
-                    return new DocumentIndexResult(
-                            "INDEXED",
-                            documentId,
-                            23,
-                            2,
-                            1,
-                            1
-                    );
-                });
-
-        DocumentController controller = new DocumentController(
-                storageDirectory.toString(),
-                service
+    @DynamicPropertySource
+    static void properties(DynamicPropertyRegistry registry) {
+        registry.add(
+                "app.storage.location",
+                () -> storageDirectory.toString()
         );
-        MockMultipartFile file = new MockMultipartFile(
-                "file",
-                "handbook.txt",
-                "text/plain",
-                content
+        registry.add(
+                "spring.datasource.url",
+                () -> "jdbc:h2:mem:" + DATABASE_NAME
+                        + ";DB_CLOSE_DELAY=-1"
         );
+    }
 
-        ResponseEntity<Map<String, Object>> response =
-                controller.upload(file);
-        Map<String, Object> body = response.getBody();
+    @Autowired
+    MockMvc mockMvc;
 
-        assertEquals(HttpStatus.CREATED, response.getStatusCode());
-        assertNotNull(body);
-        assertEquals("STORED", body.get("status"));
-        assertEquals("INDEXED", body.get("indexingStatus"));
-        assertEquals(body.get("id"), body.get("documentId"));
-        assertEquals(23L, body.get("characters"));
-        assertEquals(2L, body.get("words"));
-        assertEquals(1, body.get("chunkCount"));
-        assertEquals(1, body.get("indexedChunks"));
-        assertFalse(body.containsKey("indexingError"));
+    @Autowired
+    DocumentMetadataRepository repository;
 
-        String documentId = (String) body.get("documentId");
-        assertTrue(Files.exists(storageDirectory.resolve(documentId)));
-        assertArrayEquals(
-                content,
-                Files.readAllBytes(storageDirectory.resolve(documentId))
-        );
+    @Autowired
+    DocumentManagementService managementService;
 
-        ArgumentCaptor<String> filename =
-                ArgumentCaptor.forClass(String.class);
-        ArgumentCaptor<byte[]> sentContent =
-                ArgumentCaptor.forClass(byte[].class);
-        ArgumentCaptor<String> sentDocumentId =
-                ArgumentCaptor.forClass(String.class);
+    @MockitoBean
+    DocumentParsingService parsingService;
 
-        verify(service).index(
-                filename.capture(),
-                sentContent.capture(),
-                sentDocumentId.capture()
-        );
-        assertEquals("handbook.txt", filename.getValue());
-        assertArrayEquals(content, sentContent.getValue());
-        assertEquals(documentId, sentDocumentId.getValue());
+    @BeforeEach
+    void resetState() throws Exception {
+        reset(parsingService);
+        repository.deleteAll();
+        try (var files = Files.list(storageDirectory)) {
+            for (Path path : files.toList()) {
+                Files.deleteIfExists(path);
+            }
+        }
     }
 
     @Test
-    void unavailableAiServiceReturnsIndexFailedAndKeepsFile()
-            throws Exception {
-        DocumentParsingService service =
-                mock(DocumentParsingService.class);
-        when(service.index(anyString(), any(byte[].class), anyString()))
-                .thenThrow(new ResourceAccessException("Connection refused"));
-
-        DocumentController controller = new DocumentController(
-                storageDirectory.toString(),
-                service
-        );
-        byte[] content = "stored even if AI is down".getBytes();
-
-        ResponseEntity<Map<String, Object>> response = controller.upload(
-                new MockMultipartFile(
-                        "file",
-                        "offline.txt",
-                        "text/plain",
-                        content
-                )
-        );
-        Map<String, Object> body = response.getBody();
-
-        assertNotNull(body);
-        assertEquals("STORED", body.get("status"));
-        assertEquals("INDEX_FAILED", body.get("indexingStatus"));
-        assertEquals(
-                "Document was stored but indexing failed",
-                body.get("indexingError")
-        );
-        assertNull(body.get("characters"));
-        assertNull(body.get("words"));
-        assertNull(body.get("chunkCount"));
-        assertNull(body.get("indexedChunks"));
-
-        Path storedFile = storageDirectory.resolve(
-                (String) body.get("documentId")
-        );
-        assertTrue(Files.exists(storedFile));
-        assertArrayEquals(content, Files.readAllBytes(storedFile));
-    }
-
-    @Test
-    void invalidAiResponseReturnsIndexFailedAndKeepsFile()
-            throws Exception {
-        DocumentParsingService service =
-                mock(DocumentParsingService.class);
-        when(service.index(anyString(), any(byte[].class), anyString()))
-                .thenThrow(new IllegalStateException(
-                        "AI service did not confirm indexing"
+    void uploadPersistsMetadataAndListSupportsSearch() throws Exception {
+        when(parsingService.index(anyString(), any(byte[].class), anyString()))
+                .thenAnswer(invocation -> new DocumentIndexResult(
+                        "INDEXED",
+                        invocation.getArgument(2),
+                        23,
+                        2,
+                        1,
+                        1
                 ));
 
-        DocumentController controller = new DocumentController(
-                storageDirectory.toString(),
-                service
-        );
-        ResponseEntity<Map<String, Object>> response = controller.upload(
-                new MockMultipartFile(
-                        "file",
-                        "invalid-response.txt",
-                        "text/plain",
-                        "content".getBytes()
-                )
-        );
-        Map<String, Object> body = response.getBody();
+        String body = mockMvc.perform(multipart("/api/documents/upload")
+                        .file(new MockMultipartFile(
+                                "file",
+                                "handbook.txt",
+                                "text/plain",
+                                "EnterpriseMind handbook".getBytes()
+                        )))
+                .andExpect(status().isCreated())
+                .andExpect(jsonPath("$.status").value("STORED"))
+                .andExpect(jsonPath("$.indexingStatus").value("INDEXED"))
+                .andExpect(jsonPath("$.originalName").value("handbook.txt"))
+                .andExpect(jsonPath("$.createdAt").exists())
+                .andReturn().getResponse().getContentAsString();
 
-        assertNotNull(body);
-        assertEquals("INDEX_FAILED", body.get("indexingStatus"));
-        assertTrue(Files.exists(storageDirectory.resolve(
-                (String) body.get("documentId")
-        )));
+        String documentId = body.split("\\\"documentId\\\":\\\"")[1]
+                .split("\\\"")[0];
+        assertTrue(Files.exists(storageDirectory.resolve(documentId)));
+        assertTrue(repository.existsById(documentId));
+
+        mockMvc.perform(get("/api/documents")
+                        .param("query", "HAND")
+                        .param("page", "0")
+                        .param("size", "10"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.totalElements").value(1))
+                .andExpect(jsonPath("$.documents[0].documentId")
+                        .value(documentId));
     }
 
     @Test
-    void rejectsEmptyFileWithoutSavingIt() throws Exception {
-        DocumentController controller = new DocumentController(
-                storageDirectory.toString(),
-                mock(DocumentParsingService.class)
-        );
+    void indexingFailureKeepsFileAndPersistentRecord() throws Exception {
+        when(parsingService.index(anyString(), any(byte[].class), anyString()))
+                .thenThrow(new ResourceAccessException("Connection refused"));
 
-        ResponseStatusException exception = assertThrows(
-                ResponseStatusException.class,
-                () -> controller.upload(new MockMultipartFile(
-                        "file",
-                        "empty.txt",
-                        "text/plain",
-                        new byte[0]
-                ))
-        );
+        mockMvc.perform(multipart("/api/documents/upload")
+                        .file(new MockMultipartFile(
+                                "file",
+                                "offline.txt",
+                                "text/plain",
+                                "keep this file".getBytes()
+                        )))
+                .andExpect(status().isCreated())
+                .andExpect(jsonPath("$.indexingStatus")
+                        .value("INDEX_FAILED"));
 
-        assertEquals(HttpStatus.BAD_REQUEST, exception.getStatusCode());
-        try (var files = Files.list(storageDirectory)) {
-            assertEquals(0, files.count());
-        }
+        DocumentMetadata stored = repository.findAll().getFirst();
+        assertTrue(Files.exists(
+                storageDirectory.resolve(stored.getStoragePath())
+        ));
+        assertEquals("INDEX_FAILED", stored.getIndexingStatus());
     }
 
     @Test
-    void rejectsUnsupportedFileWithoutSavingIt() throws Exception {
-        DocumentController controller = new DocumentController(
-                storageDirectory.toString(),
-                mock(DocumentParsingService.class)
-        );
+    void deleteRemovesVectorsFileAndMetadataOnlyAfterConfirmation()
+            throws Exception {
+        when(parsingService.index(anyString(), any(byte[].class), anyString()))
+                .thenAnswer(invocation -> new DocumentIndexResult(
+                        "INDEXED", invocation.getArgument(2), 7, 1, 1, 1
+                ));
+        mockMvc.perform(multipart("/api/documents/upload")
+                        .file(new MockMultipartFile(
+                                "file", "delete.txt", "text/plain",
+                                "content".getBytes()
+                        )))
+                .andExpect(status().isCreated());
+        DocumentMetadata stored = repository.findAll().getFirst();
+        Path storedPath = storageDirectory.resolve(stored.getStoragePath());
+
+        mockMvc.perform(delete(
+                        "/api/documents/{documentId}",
+                        stored.getDocumentId()
+                ))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.status").value("DELETED"));
+
+        verify(parsingService).delete(stored.getDocumentId());
+        assertFalse(repository.existsById(stored.getDocumentId()));
+        assertFalse(Files.exists(storedPath));
+    }
+
+    @Test
+    void vectorDeleteFailureRestoresFileAndKeepsMetadata() throws Exception {
+        when(parsingService.index(anyString(), any(byte[].class), anyString()))
+                .thenThrow(new ResourceAccessException("offline"));
+        mockMvc.perform(multipart("/api/documents/upload")
+                        .file(new MockMultipartFile(
+                                "file", "restore.txt", "text/plain",
+                                "original bytes".getBytes()
+                        )))
+                .andExpect(status().isCreated());
+        DocumentMetadata stored = repository.findAll().getFirst();
+        Path storedPath = storageDirectory.resolve(stored.getStoragePath());
+        byte[] before = Files.readAllBytes(storedPath);
+        doThrow(new ResourceAccessException("offline"))
+                .when(parsingService).delete(stored.getDocumentId());
+
+        mockMvc.perform(delete(
+                        "/api/documents/{documentId}",
+                        stored.getDocumentId()
+                ))
+                .andExpect(status().isBadGateway());
+
+        assertTrue(repository.existsById(stored.getDocumentId()));
+        assertTrue(Files.exists(storedPath));
+        assertArrayEquals(before, Files.readAllBytes(storedPath));
+    }
+
+    @Test
+    void rejectsInvalidFilesAndUnsafeDocumentIds() throws Exception {
+        mockMvc.perform(multipart("/api/documents/upload")
+                        .file(new MockMultipartFile(
+                                "file", "empty.txt", "text/plain", new byte[0]
+                        )))
+                .andExpect(status().isBadRequest());
+        mockMvc.perform(multipart("/api/documents/upload")
+                        .file(new MockMultipartFile(
+                                "file", "bad.exe", "application/octet-stream",
+                                new byte[]{1}
+                        )))
+                .andExpect(status().isBadRequest());
 
         ResponseStatusException exception = assertThrows(
                 ResponseStatusException.class,
-                () -> controller.upload(new MockMultipartFile(
-                        "file",
-                        "program.exe",
-                        "application/octet-stream",
-                        new byte[]{1, 2, 3}
-                ))
+                () -> managementService.delete("../secret.txt")
         );
-
-        assertEquals(HttpStatus.BAD_REQUEST, exception.getStatusCode());
-        try (var files = Files.list(storageDirectory)) {
-            assertEquals(0, files.count());
-        }
+        assertEquals(400, exception.getStatusCode().value());
+        assertTrue(repository.findAll().isEmpty());
     }
 }

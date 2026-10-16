@@ -11,7 +11,16 @@ export type UploadDocumentResponse = {
   words: number | null
   chunkCount: number | null
   indexedChunks: number | null
+  createdAt: string
   indexingError?: string
+}
+
+export type DocumentPageResponse = {
+  documents: UploadDocumentResponse[]
+  page: number
+  size: number
+  totalElements: number
+  totalPages: number
 }
 
 export type SearchLimit = 3 | 5 | 10
@@ -67,7 +76,7 @@ function isNumberOrNull(value: unknown): value is number | null {
   return value === null || typeof value === 'number'
 }
 
-function parseUploadResponse(payload: unknown): UploadDocumentResponse {
+function parseDocument(payload: unknown): UploadDocumentResponse {
   if (!payload || typeof payload !== 'object') {
     throw new Error('The upload service returned an unexpected response.')
   }
@@ -87,7 +96,8 @@ function parseUploadResponse(payload: unknown): UploadDocumentResponse {
     !isNumberOrNull(response.characters) ||
     !isNumberOrNull(response.words) ||
     !isNumberOrNull(response.chunkCount) ||
-    !isNumberOrNull(response.indexedChunks)
+    !isNumberOrNull(response.indexedChunks) ||
+    typeof response.createdAt !== 'string'
   ) {
     throw new Error('The upload service returned an unexpected response.')
   }
@@ -103,10 +113,35 @@ function parseUploadResponse(payload: unknown): UploadDocumentResponse {
     words: response.words,
     chunkCount: response.chunkCount,
     indexedChunks: response.indexedChunks,
+    createdAt: response.createdAt,
     indexingError:
       typeof response.indexingError === 'string'
         ? response.indexingError
         : undefined,
+  }
+}
+
+function parseDocumentPage(payload: unknown): DocumentPageResponse {
+  if (!payload || typeof payload !== 'object') {
+    throw new Error('The document service returned an unexpected response.')
+  }
+  const response = payload as Record<string, unknown>
+  if (
+    !Array.isArray(response.documents) ||
+    typeof response.page !== 'number' ||
+    typeof response.size !== 'number' ||
+    typeof response.totalElements !== 'number' ||
+    typeof response.totalPages !== 'number'
+  ) {
+    throw new Error('The document service returned an unexpected response.')
+  }
+
+  return {
+    documents: response.documents.map(parseDocument),
+    page: response.page,
+    size: response.size,
+    totalElements: response.totalElements,
+    totalPages: response.totalPages,
   }
 }
 
@@ -157,7 +192,40 @@ export async function uploadDocument(
     method: 'POST',
     body: formData,
   })
-  return parseUploadResponse(payload)
+  return parseDocument(payload)
+}
+
+export async function listDocuments(
+  query: string,
+  page: number,
+  size = 10,
+): Promise<DocumentPageResponse> {
+  const parameters = new URLSearchParams({
+    query,
+    page: String(page),
+    size: String(size),
+  })
+  const payload = await requestJson(`/api/documents?${parameters}`, {
+    method: 'GET',
+  })
+  return parseDocumentPage(payload)
+}
+
+export async function deleteDocument(documentId: string): Promise<void> {
+  const payload = await requestJson(
+    `/api/documents/${encodeURIComponent(documentId)}`,
+    { method: 'DELETE' },
+  )
+  if (!payload || typeof payload !== 'object') {
+    throw new Error('The delete service returned an unexpected response.')
+  }
+  const response = payload as Record<string, unknown>
+  if (
+    response.status !== 'DELETED' ||
+    response.documentId !== documentId
+  ) {
+    throw new Error('The server did not confirm document deletion.')
+  }
 }
 
 export async function searchDocuments(
