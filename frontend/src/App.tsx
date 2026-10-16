@@ -3,6 +3,7 @@ import { useState } from 'react'
 import AppLayout, { type Page } from './layouts/AppLayout'
 import Dashboard from './pages/Dashboard'
 import Documents from './pages/Documents'
+import AIAssistant from './pages/AIAssistant'
 
 function App() {
   const [currentPage, setCurrentPage] = useState<Page>('dashboard')
@@ -14,7 +15,7 @@ function App() {
       case 'documents':
         return <Documents />
       case 'assistant':
-        return <Placeholder title="AI Assistant" />
+        return <AIAssistant />
       case 'settings':
         return <Placeholder title="Settings" />
     }
