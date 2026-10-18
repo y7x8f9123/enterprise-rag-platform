@@ -14,6 +14,7 @@ from chunking import split_text
 from vector_store import VectorStore
 
 MAX_FILE_SIZE = 20 * 1024 * 1024
+MAX_PREVIEW_CHARACTERS = 100_000
 ALLOWED_EXTENSIONS = {".pdf", ".docx", ".txt"}
 DOCUMENT_ID_PATTERN = re.compile(
     r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-"
@@ -49,6 +50,11 @@ class IndexResponse(BaseModel):
     words: int
     chunk_count: int
     indexed_chunks: int
+
+
+class PreviewResponse(BaseModel):
+    text: str
+    truncated: bool
 
 
 class SearchRequest(BaseModel):
@@ -231,6 +237,17 @@ async def parse_document(file: UploadFile = File(...)):
         document_id=document_id,
         chunk_count=len(chunks),
         chunks=chunks,
+    )
+
+
+@app.post("/api/documents/preview", response_model=PreviewResponse)
+async def preview_document(file: UploadFile = File(...)):
+    filename, _, content = await read_and_validate_upload(file)
+    text = await run_in_threadpool(extract_text, filename, content)
+    truncated = len(text) > MAX_PREVIEW_CHARACTERS
+    return PreviewResponse(
+        text=text[:MAX_PREVIEW_CHARACTERS],
+        truncated=truncated,
     )
 
 

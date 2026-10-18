@@ -4,6 +4,7 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.nio.file.AtomicMoveNotSupportedException;
 import java.nio.file.Files;
+import java.nio.file.LinkOption;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
 import java.time.Instant;
@@ -15,13 +16,17 @@ import java.util.regex.Pattern;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.core.io.FileSystemResource;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.PageRequest;
 import org.springframework.data.domain.Sort;
 import org.springframework.http.HttpStatus;
+import org.springframework.http.MediaType;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.multipart.MultipartFile;
+import org.springframework.web.client.ResourceAccessException;
+import org.springframework.web.client.RestClientResponseException;
 import org.springframework.web.server.ResponseStatusException;
 
 @Service
@@ -137,14 +142,124 @@ public class DocumentManagementService {
         );
     }
 
+    @Transactional(readOnly = true)
+    public DocumentResponse details(String documentId) {
+        return DocumentResponse.from(findDocument(documentId));
+    }
+
+    @Transactional(readOnly = true)
+    public DocumentPreviewResponse preview(String documentId) {
+        StoredDocumentResource file = original(documentId);
+        try {
+            byte[] content = file.resource().getContentAsByteArray();
+            return parsingService.preview(file.originalName(), content);
+        } catch (IOException exception) {
+            throw new ResponseStatusException(
+                    HttpStatus.INTERNAL_SERVER_ERROR,
+                    "Stored document could not be read",
+                    exception
+            );
+        } catch (ResourceAccessException exception) {
+            throw new ResponseStatusException(
+                    HttpStatus.SERVICE_UNAVAILABLE,
+                    "Document preview service is unavailable",
+                    exception
+            );
+        } catch (RestClientResponseException exception) {
+            HttpStatus status = exception.getStatusCode().value() == 415
+                    ? HttpStatus.UNSUPPORTED_MEDIA_TYPE
+                    : HttpStatus.UNPROCESSABLE_ENTITY;
+            throw new ResponseStatusException(
+                    status,
+                    "Document preview could not be parsed",
+                    exception
+            );
+        } catch (RuntimeException exception) {
+            throw new ResponseStatusException(
+                    HttpStatus.UNPROCESSABLE_ENTITY,
+                    "Document preview could not be parsed",
+                    exception
+            );
+        }
+    }
+
+    @Transactional(readOnly = true)
+    public StoredDocumentResource original(String documentId) {
+        DocumentMetadata metadata = findDocument(documentId);
+        String extension = extensionOf(metadata.getOriginalName());
+        if (!ALLOWED.contains(extension)) {
+            throw new ResponseStatusException(
+                    HttpStatus.UNSUPPORTED_MEDIA_TYPE,
+                    "Unsupported document format"
+            );
+        }
+        if (!documentId.equals(metadata.getStoragePath())) {
+            throw new ResponseStatusException(
+                    HttpStatus.INTERNAL_SERVER_ERROR,
+                    "Invalid stored document path"
+            );
+        }
+
+        Path realFile;
+        try {
+            Path stored = resolveStoredPath(metadata.getStoragePath());
+            if (!Files.isRegularFile(stored, LinkOption.NOFOLLOW_LINKS)) {
+                throw new ResponseStatusException(
+                        HttpStatus.NOT_FOUND,
+                        "Stored document file not found"
+                );
+            }
+            Path realRoot = storageRoot.toRealPath();
+            realFile = stored.toRealPath();
+            if (!realFile.startsWith(realRoot) || realFile.equals(realRoot)) {
+                throw new ResponseStatusException(
+                        HttpStatus.INTERNAL_SERVER_ERROR,
+                        "Invalid stored document path"
+                );
+            }
+        } catch (ResponseStatusException exception) {
+            throw exception;
+        } catch (IOException exception) {
+            throw new ResponseStatusException(
+                    HttpStatus.NOT_FOUND,
+                    "Stored document file not found",
+                    exception
+            );
+        }
+
+        MediaType mediaType = switch (extension) {
+            case "pdf" -> MediaType.APPLICATION_PDF;
+            case "docx" -> MediaType.parseMediaType(
+                    "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+            );
+            case "txt" -> MediaType.parseMediaType(
+                    "text/plain;charset=UTF-8"
+            );
+            default -> throw new ResponseStatusException(
+                    HttpStatus.UNSUPPORTED_MEDIA_TYPE,
+                    "Unsupported document format"
+            );
+        };
+
+        try {
+            return new StoredDocumentResource(
+                    new FileSystemResource(realFile),
+                    sanitizeResponseFilename(metadata.getOriginalName()),
+                    mediaType,
+                    Files.size(realFile)
+            );
+        } catch (IOException exception) {
+            throw new ResponseStatusException(
+                    HttpStatus.NOT_FOUND,
+                    "Stored document file not found",
+                    exception
+            );
+        }
+    }
+
     @Transactional(rollbackFor = Exception.class)
     public synchronized void delete(String documentId) throws IOException {
-        validateDocumentId(documentId);
-        DocumentMetadata metadata = repository.findById(documentId)
-                .orElseThrow(() -> new ResponseStatusException(
-                        HttpStatus.NOT_FOUND,
-                        "Document not found"
-                ));
+        DocumentMetadata metadata = findDocument(documentId);
         Path original = resolveStoredPath(metadata.getStoragePath());
         Path staged = resolveStoredPath(
                 ".deleting-" + UUID.randomUUID() + ".tmp"
@@ -251,6 +366,10 @@ public class DocumentManagementService {
                 : filename.substring(dot + 1).toLowerCase(Locale.ROOT);
     }
 
+    private static String sanitizeResponseFilename(String filename) {
+        return filename.replace('\r', '_').replace('\n', '_');
+    }
+
     private static void validateDocumentId(String documentId) {
         if (documentId == null || !DOCUMENT_ID.matcher(documentId).matches()) {
             throw new ResponseStatusException(
@@ -258,6 +377,15 @@ public class DocumentManagementService {
                     "Invalid document ID"
             );
         }
+    }
+
+    private DocumentMetadata findDocument(String documentId) {
+        validateDocumentId(documentId);
+        return repository.findById(documentId)
+                .orElseThrow(() -> new ResponseStatusException(
+                        HttpStatus.NOT_FOUND,
+                        "Document not found"
+                ));
     }
 
     private Path resolveStoredPath(String relativePath) {

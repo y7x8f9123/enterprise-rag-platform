@@ -23,6 +23,24 @@ export type DocumentPageResponse = {
   totalPages: number
 }
 
+export type DashboardSummaryResponse = {
+  totalDocuments: number
+  indexedDocuments: number
+  failedDocuments: number
+  totalChunks: number
+  recentDocuments: UploadDocumentResponse[]
+}
+
+export type ServiceHealthResponse = {
+  status: string
+  service: string
+}
+
+export type DocumentPreviewResponse = {
+  text: string
+  truncated: boolean
+}
+
 export type SearchLimit = 3 | 5 | 10
 
 export type SearchResult = {
@@ -145,6 +163,63 @@ function parseDocumentPage(payload: unknown): DocumentPageResponse {
   }
 }
 
+function parseDashboardSummary(payload: unknown): DashboardSummaryResponse {
+  if (!payload || typeof payload !== 'object') {
+    throw new Error('The dashboard service returned an unexpected response.')
+  }
+
+  const response = payload as Record<string, unknown>
+  if (
+    typeof response.totalDocuments !== 'number' ||
+    typeof response.indexedDocuments !== 'number' ||
+    typeof response.failedDocuments !== 'number' ||
+    typeof response.totalChunks !== 'number' ||
+    !Array.isArray(response.recentDocuments)
+  ) {
+    throw new Error('The dashboard service returned an unexpected response.')
+  }
+
+  return {
+    totalDocuments: response.totalDocuments,
+    indexedDocuments: response.indexedDocuments,
+    failedDocuments: response.failedDocuments,
+    totalChunks: response.totalChunks,
+    recentDocuments: response.recentDocuments.map(parseDocument),
+  }
+}
+
+function parseServiceHealth(payload: unknown): ServiceHealthResponse {
+  if (!payload || typeof payload !== 'object') {
+    throw new Error('The health service returned an unexpected response.')
+  }
+
+  const response = payload as Record<string, unknown>
+  if (
+    typeof response.status !== 'string' ||
+    typeof response.service !== 'string'
+  ) {
+    throw new Error('The health service returned an unexpected response.')
+  }
+
+  return { status: response.status, service: response.service }
+}
+
+function parseDocumentPreview(payload: unknown): DocumentPreviewResponse {
+  if (!payload || typeof payload !== 'object') {
+    throw new Error('The preview service returned an unexpected response.')
+  }
+
+  const response = payload as Record<string, unknown>
+  if (
+    typeof response.text !== 'string' ||
+    typeof response.truncated !== 'boolean'
+  ) {
+    throw new Error('The preview service returned an unexpected response.')
+  }
+
+  return { text: response.text, truncated: response.truncated }
+}
+
 function isSearchResult(value: unknown): value is SearchResult {
   if (!value || typeof value !== 'object') return false
 
@@ -228,6 +303,50 @@ export async function deleteDocument(documentId: string): Promise<void> {
   }
 }
 
+export async function getDocumentDetails(
+  documentId: string,
+  signal?: AbortSignal,
+): Promise<UploadDocumentResponse> {
+  const payload = await requestJson(
+    `/api/documents/${encodeURIComponent(documentId)}`,
+    { method: 'GET', signal },
+  )
+  return parseDocument(payload)
+}
+
+export async function getDocumentPreview(
+  documentId: string,
+  signal?: AbortSignal,
+): Promise<DocumentPreviewResponse> {
+  const payload = await requestJson(
+    `/api/documents/${encodeURIComponent(documentId)}/preview`,
+    { method: 'GET', signal },
+  )
+  return parseDocumentPreview(payload)
+}
+
+export async function getDocumentContent(
+  documentId: string,
+  signal?: AbortSignal,
+): Promise<Blob> {
+  const response = await fetch(getDocumentContentUrl(documentId), {
+    method: 'GET',
+    signal,
+  })
+  if (!response.ok) {
+    throw new Error(`Original document request failed (HTTP ${response.status}).`)
+  }
+  return response.blob()
+}
+
+export function getDocumentContentUrl(documentId: string): string {
+  return `/api/documents/${encodeURIComponent(documentId)}/content`
+}
+
+export function getDocumentDownloadUrl(documentId: string): string {
+  return `/api/documents/${encodeURIComponent(documentId)}/download`
+}
+
 export async function searchDocuments(
   query: string,
   limit: SearchLimit,
@@ -240,4 +359,19 @@ export async function searchDocuments(
     body: JSON.stringify({ query, limit }),
   })
   return parseSearchResponse(payload)
+}
+
+export async function getDashboardSummary(): Promise<DashboardSummaryResponse> {
+  const payload = await requestJson('/api/dashboard/summary', {
+    method: 'GET',
+  })
+  return parseDashboardSummary(payload)
+}
+
+export async function getServiceHealth(
+  service: 'backend' | 'ai',
+): Promise<ServiceHealthResponse> {
+  const path = service === 'backend' ? '/api/health' : '/api/ai/health'
+  const payload = await requestJson(path, { method: 'GET' })
+  return parseServiceHealth(payload)
 }

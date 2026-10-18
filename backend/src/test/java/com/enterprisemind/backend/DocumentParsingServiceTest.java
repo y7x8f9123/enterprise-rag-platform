@@ -129,6 +129,34 @@ class DocumentParsingServiceTest {
         createService().delete("spring-id.txt");
     }
 
+    @Test
+    void previewSendsFileAndReadsTruncationContract() throws Exception {
+        AtomicReference<String> requestBody = new AtomicReference<>();
+        startServer("/api/documents/preview", exchange -> {
+            assertEquals("POST", exchange.getRequestMethod());
+            requestBody.set(new String(
+                    exchange.getRequestBody().readAllBytes(),
+                    StandardCharsets.ISO_8859_1
+            ));
+            sendJson(exchange, 200, """
+                    {
+                      "text": "preview text",
+                      "truncated": true
+                    }
+                    """);
+        });
+
+        DocumentPreviewResponse result = createService().preview(
+                "handbook.txt",
+                "document content".getBytes(StandardCharsets.UTF_8)
+        );
+
+        assertEquals("preview text", result.text());
+        assertTrue(result.truncated());
+        assertTrue(requestBody.get().contains("filename=\"handbook.txt\""));
+        assertTrue(requestBody.get().contains("document content"));
+    }
+
     private DocumentParsingService createService() {
         return new DocumentParsingService(
                 "http://127.0.0.1:" + server.getAddress().getPort(),

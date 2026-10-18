@@ -13,6 +13,7 @@ import {
   Clock3,
   File,
   FileText,
+  Eye,
   Info,
   LoaderCircle,
   Search,
@@ -20,6 +21,7 @@ import {
   UploadCloud,
   X,
 } from 'lucide-react'
+import DocumentDetailsModal from '../components/DocumentDetailsModal'
 import {
   deleteDocument as deleteDocumentRequest,
   listDocuments,
@@ -138,6 +140,7 @@ export default function Documents() {
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(true)
   const [dragging, setDragging] = useState(false)
+  const [selectedDocumentId, setSelectedDocumentId] = useState<string | null>(null)
   const inputRef = useRef<HTMLInputElement>(null)
 
   const loadDocuments = useCallback(async (requestedPage: number, query: string) => {
@@ -245,6 +248,7 @@ export default function Documents() {
     ))
     try {
       await deleteDocumentRequest(document.serverId)
+      if (selectedDocumentId === document.serverId) setSelectedDocumentId(null)
       setDocuments(previous => previous.filter(item => item.id !== document.id))
       setTotalElements(previous => Math.max(0, previous - 1))
       if (documents.length === 1 && page > 0) {
@@ -358,7 +362,17 @@ export default function Documents() {
                   <div className="flex min-w-0 flex-1 gap-3">
                     <div className="h-fit rounded-lg bg-indigo-50 p-3 text-indigo-600"><File size={22} /></div>
                     <div className="min-w-0 flex-1">
-                      <p className="truncate font-semibold text-slate-800">{document.originalName}</p>
+                      {document.serverId ? (
+                        <button
+                          type="button"
+                          onClick={() => setSelectedDocumentId(document.serverId ?? null)}
+                          className="block max-w-full truncate text-left font-semibold text-slate-800 hover:text-indigo-600 hover:underline"
+                        >
+                          {document.originalName}
+                        </button>
+                      ) : (
+                        <p className="truncate font-semibold text-slate-800">{document.originalName}</p>
+                      )}
                       <p className="mt-1 text-xs text-slate-500">
                         {formatSize(document.size)} · {document.createdAt.toLocaleString()}
                       </p>
@@ -374,6 +388,17 @@ export default function Documents() {
                   </div>
                   <div className="flex items-center justify-between gap-2 sm:justify-end">
                     <DocumentStatus status={document.status} />
+                    {document.serverId && (
+                      <button
+                        type="button"
+                        onClick={() => setSelectedDocumentId(document.serverId ?? null)}
+                        aria-label={`View details for ${document.originalName}`}
+                        title="View details"
+                        className="rounded-lg p-2 text-slate-400 hover:bg-indigo-50 hover:text-indigo-600"
+                      >
+                        <Eye size={19} />
+                      </button>
+                    )}
                     <button type="button" disabled={document.deleting || document.status === 'uploading'}
                       aria-label={`Delete ${document.originalName}`}
                       title={document.serverId ? 'Permanently delete document' : 'Dismiss failed upload'}
@@ -426,6 +451,14 @@ export default function Documents() {
           </div>
         )}
       </div>
+
+      {selectedDocumentId && (
+        <DocumentDetailsModal
+          key={selectedDocumentId}
+          documentId={selectedDocumentId}
+          onClose={() => setSelectedDocumentId(null)}
+        />
+      )}
     </div>
   )
 }

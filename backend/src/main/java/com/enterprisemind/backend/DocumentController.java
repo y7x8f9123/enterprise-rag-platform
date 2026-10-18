@@ -1,8 +1,12 @@
 package com.enterprisemind.backend;
 
 import java.io.IOException;
+import java.nio.charset.StandardCharsets;
 import java.util.Map;
 
+import org.springframework.core.io.Resource;
+import org.springframework.http.ContentDisposition;
+import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.DeleteMapping;
@@ -42,6 +46,26 @@ public class DocumentController {
         return documents.list(query, page, size);
     }
 
+    @GetMapping("/{documentId}")
+    public DocumentResponse details(@PathVariable String documentId) {
+        return documents.details(documentId);
+    }
+
+    @GetMapping("/{documentId}/preview")
+    public DocumentPreviewResponse preview(@PathVariable String documentId) {
+        return documents.preview(documentId);
+    }
+
+    @GetMapping("/{documentId}/content")
+    public ResponseEntity<Resource> content(@PathVariable String documentId) {
+        return fileResponse(documents.original(documentId), false);
+    }
+
+    @GetMapping("/{documentId}/download")
+    public ResponseEntity<Resource> download(@PathVariable String documentId) {
+        return fileResponse(documents.original(documentId), true);
+    }
+
     @DeleteMapping("/{documentId}")
     public ResponseEntity<Map<String, String>> delete(
             @PathVariable String documentId
@@ -51,5 +75,30 @@ public class DocumentController {
                 "status", "DELETED",
                 "documentId", documentId
         ));
+    }
+
+    private static ResponseEntity<Resource> fileResponse(
+            StoredDocumentResource file,
+            boolean download
+    ) {
+        ContentDisposition disposition = (download
+                ? ContentDisposition.attachment()
+                : ContentDisposition.inline())
+                .filename(file.originalName(), StandardCharsets.UTF_8)
+                .build();
+
+        return ResponseEntity.ok()
+                .contentType(file.mediaType())
+                .contentLength(file.contentLength())
+                .header(
+                        HttpHeaders.CONTENT_DISPOSITION,
+                        disposition.toString()
+                )
+                .header("X-Content-Type-Options", "nosniff")
+                .header(
+                        HttpHeaders.CACHE_CONTROL,
+                        "private, no-store, max-age=0"
+                )
+                .body(file.resource());
     }
 }

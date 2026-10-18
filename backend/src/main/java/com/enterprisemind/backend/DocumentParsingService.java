@@ -82,6 +82,37 @@ public class DocumentParsingService {
         return response;
     }
 
+    public DocumentPreviewResponse preview(
+            String filename,
+            byte[] content
+    ) {
+        ByteArrayResource resource =
+                new ByteArrayResource(content) {
+                    @Override
+                    public String getFilename() {
+                        return filename;
+                    }
+                };
+
+        MultiValueMap<String, Object> body =
+                new LinkedMultiValueMap<>();
+        body.add("file", resource);
+
+        DocumentPreviewResponse response = restClient.post()
+                .uri("/api/documents/preview")
+                .contentType(MediaType.MULTIPART_FORM_DATA)
+                .body(body)
+                .retrieve()
+                .body(DocumentPreviewResponse.class);
+
+        if (response == null || response.text() == null) {
+            throw new IllegalStateException(
+                    "AI service returned an invalid preview"
+            );
+        }
+        return response;
+    }
+
     public void delete(String documentId) {
         if (documentId == null || documentId.isBlank()) {
             throw new IllegalArgumentException(

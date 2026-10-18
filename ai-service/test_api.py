@@ -1,6 +1,8 @@
 import unittest
-from unittest.mock import patch
+from io import BytesIO
+from unittest.mock import MagicMock, patch
 
+from docx import Document
 from fastapi.testclient import TestClient
 
 import main
@@ -169,6 +171,85 @@ class ApiTests(unittest.TestCase):
         self.assertTrue(store.closed)
         self.client_context = TestClient(main.app)
         self.client = self.client_context.__enter__()
+
+    def test_txt_preview_and_long_preview_truncation(self):
+        response = self.client.post(
+            "/api/documents/preview",
+            files={"file": ("note.txt", "hello 世界".encode(), "text/plain")},
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json(), {
+            "text": "hello 世界",
+            "truncated": False,
+        })
+
+        long_text = "x" * (main.MAX_PREVIEW_CHARACTERS + 1)
+        response = self.client.post(
+            "/api/documents/preview",
+            files={"file": ("long.txt", long_text.encode(), "text/plain")},
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.json()["truncated"])
+        self.assertEqual(
+            len(response.json()["text"]),
+            main.MAX_PREVIEW_CHARACTERS,
+        )
+
+    def test_pdf_preview_extracts_page_text(self):
+        first_page = MagicMock()
+        first_page.extract_text.return_value = "First page"
+        second_page = MagicMock()
+        second_page.extract_text.return_value = "Second page"
+        reader = MagicMock()
+        reader.is_encrypted = False
+        reader.pages = [first_page, second_page]
+
+        with patch.object(main, "PdfReader", return_value=reader):
+            response = self.client.post(
+                "/api/documents/preview",
+                files={"file": ("policy.pdf", b"%PDF-test", "application/pdf")},
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["text"], "First page\n\nSecond page")
+
+    def test_docx_preview_includes_paragraphs_and_tables(self):
+        document = Document()
+        document.add_paragraph("Policy heading")
+        table = document.add_table(rows=1, cols=2)
+        table.cell(0, 0).text = "Name"
+        table.cell(0, 1).text = "Value"
+        content = BytesIO()
+        document.save(content)
+
+        response = self.client.post(
+            "/api/documents/preview",
+            files={
+                "file": (
+                    "policy.docx",
+                    content.getvalue(),
+                    "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                )
+            },
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("Policy heading", response.json()["text"])
+        self.assertIn("Name | Value", response.json()["text"])
+
+    def test_preview_rejects_unsupported_and_unparseable_files(self):
+        unsupported = self.client.post(
+            "/api/documents/preview",
+            files={"file": ("unsafe.exe", b"binary", "application/octet-stream")},
+        )
+        self.assertEqual(unsupported.status_code, 415)
+
+        broken = self.client.post(
+            "/api/documents/preview",
+            files={"file": ("broken.pdf", b"not a pdf", "application/pdf")},
+        )
+        self.assertEqual(broken.status_code, 422)
+        self.assertEqual(broken.json()["detail"], "Unable to parse document")
 
 
 if __name__ == "__main__":
