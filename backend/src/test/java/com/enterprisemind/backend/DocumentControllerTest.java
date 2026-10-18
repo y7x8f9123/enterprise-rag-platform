@@ -358,7 +358,7 @@ class DocumentControllerTest {
                         "/api/documents/{documentId}/preview",
                         brokenId
                 ))
-                .andExpect(status().isUnprocessableEntity());
+                .andExpect(status().isUnprocessableContent());
 
         String longId = storeDocument("long.txt", "content".getBytes());
         when(parsingService.preview(
