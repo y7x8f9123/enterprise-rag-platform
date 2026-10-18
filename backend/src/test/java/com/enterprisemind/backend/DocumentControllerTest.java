@@ -152,6 +152,40 @@ class DocumentControllerTest {
     }
 
     @Test
+    void listFiltersPersistedDocumentsByIndexingStatus() throws Exception {
+        repository.save(new DocumentMetadata(
+                UUID.randomUUID() + ".txt",
+                "indexed-handbook.txt",
+                10,
+                "indexed.txt",
+                "INDEXED",
+                Instant.parse("2026-10-18T00:00:00Z")
+        ));
+        repository.save(new DocumentMetadata(
+                UUID.randomUUID() + ".txt",
+                "failed-handbook.txt",
+                10,
+                "failed.txt",
+                "INDEX_FAILED",
+                Instant.parse("2026-10-19T00:00:00Z")
+        ));
+
+        mockMvc.perform(get("/api/documents")
+                        .param("query", "handbook")
+                        .param("status", "INDEX_FAILED")
+                        .param("page", "0")
+                        .param("size", "10"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.totalElements").value(1))
+                .andExpect(jsonPath("$.documents[0].originalName")
+                        .value("failed-handbook.txt"));
+
+        mockMvc.perform(get("/api/documents")
+                        .param("status", "UNKNOWN"))
+                .andExpect(status().isBadRequest());
+    }
+
+    @Test
     void deleteRemovesVectorsFileAndMetadataOnlyAfterConfirmation()
             throws Exception {
         when(parsingService.index(anyString(), any(byte[].class), anyString()))

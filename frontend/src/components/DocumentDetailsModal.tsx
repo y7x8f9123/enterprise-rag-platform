@@ -15,9 +15,11 @@ import {
   type UploadDocumentResponse,
 } from '../api/client'
 import OriginalDocumentView from './OriginalDocumentView'
+import type { DocumentViewPreference } from '../settings/settings'
 
 type Props = {
   documentId: string
+  defaultView?: DocumentViewPreference
   onClose: () => void
 }
 
@@ -44,8 +46,12 @@ function IndexingStatus({ status }: { status?: string }) {
   )
 }
 
-export default function DocumentDetailsModal({ documentId, onClose }: Props) {
-  const [activeTab, setActiveTab] = useState<'original' | 'extracted'>('original')
+export default function DocumentDetailsModal({
+  documentId,
+  defaultView = 'original',
+  onClose,
+}: Props) {
+  const [activeTab, setActiveTab] = useState<DocumentViewPreference>(defaultView)
   const [details, setDetails] = useState<UploadDocumentResponse | null>(null)
   const [preview, setPreview] = useState<DocumentPreviewResponse | null>(null)
   const [detailsLoading, setDetailsLoading] = useState(true)

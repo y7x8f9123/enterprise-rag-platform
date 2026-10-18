@@ -20,6 +20,9 @@ import {
   type DashboardSummaryResponse,
   type IndexingStatus,
 } from '../api/client'
+import DocumentDetailsModal from '../components/DocumentDetailsModal'
+import type { NavigationTarget } from '../navigation'
+import { useAppSettings } from '../settings/useAppSettings'
 
 type HealthState = 'loading' | 'healthy' | 'unavailable'
 
@@ -62,10 +65,12 @@ function HealthIndicator({
   label,
   state,
   icon: Icon,
+  onClick,
 }: {
   label: string
   state: HealthState
   icon: typeof Server
+  onClick: () => void
 }) {
   const presentation = {
     loading: {
@@ -87,7 +92,11 @@ function HealthIndicator({
   const StateIcon = presentation.icon
 
   return (
-    <div className="flex items-center justify-between gap-4 rounded-lg border border-slate-100 p-4">
+    <button
+      type="button"
+      onClick={onClick}
+      className="flex w-full items-center justify-between gap-4 rounded-lg border border-slate-100 p-4 text-left transition-colors hover:border-indigo-300 hover:bg-indigo-50 focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-indigo-100"
+    >
       <div className="flex items-center gap-3">
         <div className="rounded-lg bg-indigo-50 p-2.5 text-indigo-600">
           <Icon size={20} />
@@ -104,16 +113,34 @@ function HealthIndicator({
         />
         {presentation.label}
       </span>
-    </div>
+    </button>
   )
 }
 
-export default function Dashboard() {
+type Props = {
+  onNavigate: (target: NavigationTarget) => void
+}
+
+export default function Dashboard({ onNavigate }: Props) {
+  const { settings } = useAppSettings()
   const [summary, setSummary] = useState<DashboardSummaryResponse | null>(null)
   const [summaryLoading, setSummaryLoading] = useState(true)
   const [error, setError] = useState('')
   const [backendHealth, setBackendHealth] = useState<HealthState>('loading')
   const [aiHealth, setAiHealth] = useState<HealthState>('loading')
+  const [selectedHealth, setSelectedHealth] = useState<'backend' | 'ai' | null>(null)
+  const [selectedDocumentId, setSelectedDocumentId] = useState<string | null>(null)
+
+  const refreshService = useCallback(async (service: 'backend' | 'ai') => {
+    const setState = service === 'backend' ? setBackendHealth : setAiHealth
+    setState('loading')
+    try {
+      const response = await getServiceHealth(service)
+      setState(response.status === 'UP' ? 'healthy' : 'unavailable')
+    } catch {
+      setState('unavailable')
+    }
+  }, [])
 
   const refresh = useCallback(async () => {
     setSummaryLoading(true)
@@ -132,16 +159,11 @@ export default function Dashboard() {
       })
       .finally(() => setSummaryLoading(false))
 
-    const backendRequest = getServiceHealth('backend')
-      .then(response => setBackendHealth(response.status === 'UP' ? 'healthy' : 'unavailable'))
-      .catch(() => setBackendHealth('unavailable'))
-
-    const aiRequest = getServiceHealth('ai')
-      .then(response => setAiHealth(response.status === 'UP' ? 'healthy' : 'unavailable'))
-      .catch(() => setAiHealth('unavailable'))
+    const backendRequest = refreshService('backend')
+    const aiRequest = refreshService('ai')
 
     await Promise.allSettled([summaryRequest, backendRequest, aiRequest])
-  }, [])
+  }, [refreshService])
 
   useEffect(() => {
     const timer = window.setTimeout(() => void refresh(), 0)
@@ -154,24 +176,28 @@ export default function Dashboard() {
       value: summary?.totalDocuments,
       icon: Files,
       description: 'Documents in your workspace',
+      target: { page: 'documents' } as NavigationTarget,
     },
     {
       label: 'Indexed Documents',
       value: summary?.indexedDocuments,
       icon: CheckCircle2,
       description: 'Ready for semantic search',
+      target: { page: 'documents', status: 'INDEXED' } as NavigationTarget,
     },
     {
       label: 'Failed Documents',
       value: summary?.failedDocuments,
       icon: TriangleAlert,
       description: 'Documents needing attention',
+      target: { page: 'documents', status: 'INDEX_FAILED' } as NavigationTarget,
     },
     {
       label: 'Indexed Chunks',
       value: summary?.totalChunks,
       icon: Layers3,
       description: 'Searchable text segments',
+      target: { page: 'assistant' } as NavigationTarget,
     },
   ]
 
@@ -212,9 +238,11 @@ export default function Dashboard() {
           const Icon = stat.icon
 
           return (
-            <div
+            <button
+              type="button"
               key={stat.label}
-              className="rounded-xl border border-slate-200 bg-white p-5 shadow-sm"
+              onClick={() => onNavigate(stat.target)}
+              className="rounded-xl border border-slate-200 bg-white p-5 text-left shadow-sm transition-colors hover:border-indigo-300 hover:bg-indigo-50 focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-indigo-100"
             >
               <div className="mb-5 flex items-center">
                 <div className="rounded-lg bg-indigo-50 p-2.5 text-indigo-600">
@@ -236,7 +264,7 @@ export default function Dashboard() {
               <p className="mt-2 text-xs text-slate-400">
                 {stat.description}
               </p>
-            </div>
+            </button>
           )
         })}
       </div>
@@ -272,7 +300,13 @@ export default function Dashboard() {
           ) : (
             <div className="divide-y divide-slate-100">
               {summary.recentDocuments.map(document => (
-                <article key={document.documentId} className="flex flex-col gap-3 py-4 first:pt-0 last:pb-0 sm:flex-row sm:items-center sm:justify-between">
+                <button
+                  type="button"
+                  key={document.documentId}
+                  onClick={() => setSelectedDocumentId(document.documentId)}
+                  className="flex w-full flex-col gap-3 rounded-lg py-4 text-left transition-colors first:pt-0 last:pb-0 hover:bg-slate-50 focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-indigo-100 sm:flex-row sm:items-center sm:justify-between"
+                  aria-label={`Open details for ${document.originalName}`}
+                >
                   <div className="flex min-w-0 items-center gap-3">
                     <div className="shrink-0 rounded-lg bg-indigo-50 p-2.5 text-indigo-600">
                       <FileText size={19} />
@@ -287,7 +321,7 @@ export default function Dashboard() {
                     </div>
                   </div>
                   <DocumentStatus status={document.indexingStatus} />
-                </article>
+                </button>
               ))}
             </div>
           )}
@@ -302,11 +336,56 @@ export default function Dashboard() {
           </div>
 
           <div className="space-y-3">
-            <HealthIndicator label="Backend" state={backendHealth} icon={Server} />
-            <HealthIndicator label="AI Service" state={aiHealth} icon={Bot} />
+            <HealthIndicator
+              label="Backend"
+              state={backendHealth}
+              icon={Server}
+              onClick={() => setSelectedHealth('backend')}
+            />
+            <HealthIndicator
+              label="AI Service"
+              state={aiHealth}
+              icon={Bot}
+              onClick={() => setSelectedHealth('ai')}
+            />
           </div>
+
+          {selectedHealth && (
+            <div className="mt-4 rounded-lg border border-slate-200 bg-slate-50 p-4" aria-live="polite">
+              <p className="text-sm font-semibold text-slate-800">
+                {selectedHealth === 'backend' ? 'Spring Boot Backend' : 'FastAPI AI Service'}
+              </p>
+              <p className="mt-1 text-xs text-slate-500">
+                Endpoint: {selectedHealth === 'backend' ? '/api/health' : '/api/ai/health'}
+              </p>
+              <p className="mt-2 text-sm text-slate-700">
+                Current status: {(selectedHealth === 'backend' ? backendHealth : aiHealth) === 'loading'
+                  ? 'Checking…'
+                  : (selectedHealth === 'backend' ? backendHealth : aiHealth) === 'healthy'
+                    ? 'Healthy'
+                    : 'Unavailable'}
+              </p>
+              <button
+                type="button"
+                onClick={() => void refreshService(selectedHealth)}
+                disabled={(selectedHealth === 'backend' ? backendHealth : aiHealth) === 'loading'}
+                className="mt-3 inline-flex items-center gap-2 rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs font-semibold text-slate-700 hover:bg-slate-100 focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-indigo-100 disabled:opacity-60"
+              >
+                <RefreshCw size={14} /> Refresh this service
+              </button>
+            </div>
+          )}
         </section>
       </div>
+
+      {selectedDocumentId && (
+        <DocumentDetailsModal
+          key={selectedDocumentId}
+          documentId={selectedDocumentId}
+          defaultView={settings.defaultDocumentView}
+          onClose={() => setSelectedDocumentId(null)}
+        />
+      )}
     </div>
   )
 }

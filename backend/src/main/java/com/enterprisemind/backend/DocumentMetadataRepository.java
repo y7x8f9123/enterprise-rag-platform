@@ -15,6 +15,18 @@ public interface DocumentMetadataRepository
             Pageable pageable
     );
 
+    Page<DocumentMetadata> findByIndexingStatus(
+            String indexingStatus,
+            Pageable pageable
+    );
+
+    Page<DocumentMetadata>
+            findByOriginalNameContainingIgnoreCaseAndIndexingStatus(
+                    String originalName,
+                    String indexingStatus,
+                    Pageable pageable
+            );
+
     long countByIndexingStatus(String indexingStatus);
 
     @Query("""

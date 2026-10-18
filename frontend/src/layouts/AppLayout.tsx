@@ -11,8 +11,9 @@ import {
   Search,
   Bell,
 } from 'lucide-react'
+import type { Page } from '../navigation'
 
-export type Page = 'dashboard' | 'documents' | 'assistant' | 'settings'
+export type { Page } from '../navigation'
 
 interface AppLayoutProps {
   children: ReactNode

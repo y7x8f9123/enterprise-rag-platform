@@ -41,9 +41,10 @@ public class DocumentController {
     public DocumentPageResponse list(
             @RequestParam(defaultValue = "") String query,
             @RequestParam(defaultValue = "0") int page,
-            @RequestParam(defaultValue = "20") int size
+            @RequestParam(defaultValue = "20") int size,
+            @RequestParam(defaultValue = "") String status
     ) {
-        return documents.list(query, page, size);
+        return documents.list(query, page, size, status);
     }
 
     @GetMapping("/{documentId}")

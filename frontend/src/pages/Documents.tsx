@@ -22,11 +22,13 @@ import {
   X,
 } from 'lucide-react'
 import DocumentDetailsModal from '../components/DocumentDetailsModal'
+import { useAppSettings } from '../settings/useAppSettings'
 import {
   deleteDocument as deleteDocumentRequest,
   listDocuments,
   uploadDocument as uploadDocumentRequest,
   type UploadDocumentResponse,
+  type IndexingStatus,
 } from '../api/client'
 
 type UploadStatus =
@@ -54,8 +56,6 @@ type DisplayDocument = {
 
 const allowedExtensions = ['pdf', 'docx', 'txt']
 const maxSize = 20 * 1024 * 1024
-const pageSize = 10
-
 const statusPresentation = {
   uploading: {
     label: 'Uploading',
@@ -131,9 +131,17 @@ function DocumentStatus({ status }: { status: UploadStatus }) {
   )
 }
 
-export default function Documents() {
+type Props = {
+  initialStatusFilter?: IndexingStatus
+}
+
+export default function Documents({ initialStatusFilter }: Props) {
+  const { settings } = useAppSettings()
   const [documents, setDocuments] = useState<DisplayDocument[]>([])
   const [search, setSearch] = useState('')
+  const [statusFilter, setStatusFilter] = useState<IndexingStatus | undefined>(
+    initialStatusFilter,
+  )
   const [page, setPage] = useState(0)
   const [totalElements, setTotalElements] = useState(0)
   const [totalPages, setTotalPages] = useState(0)
@@ -146,7 +154,12 @@ export default function Documents() {
   const loadDocuments = useCallback(async (requestedPage: number, query: string) => {
     setLoading(true)
     try {
-      const result = await listDocuments(query, requestedPage, pageSize)
+      const result = await listDocuments(
+        query,
+        requestedPage,
+        settings.documentsPerPage,
+        statusFilter,
+      )
       setDocuments(result.documents.map(fromResponse))
       setPage(result.page)
       setTotalElements(result.totalElements)
@@ -160,7 +173,7 @@ export default function Documents() {
     } finally {
       setLoading(false)
     }
-  }, [])
+  }, [settings.documentsPerPage, statusFilter])
 
   useEffect(() => {
     const timer = window.setTimeout(() => {
@@ -340,6 +353,21 @@ export default function Documents() {
           </div>
         </div>
 
+        {statusFilter && (
+          <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-200 bg-indigo-50 px-5 py-3 text-sm">
+            <p className="font-medium text-indigo-700">
+              Showing {statusFilter === 'INDEXED' ? 'indexed documents' : 'documents with failed indexing'}
+            </p>
+            <button
+              type="button"
+              onClick={() => setStatusFilter(undefined)}
+              className="rounded-lg border border-indigo-200 bg-white px-3 py-1.5 font-semibold text-indigo-700 hover:bg-indigo-100 focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-indigo-100"
+            >
+              Clear filter
+            </button>
+          </div>
+        )}
+
         {loading ? (
           <div className="flex items-center justify-center gap-2 p-12 text-sm text-slate-500">
             <LoaderCircle size={20} className="animate-spin" /> Loading documents…
@@ -348,10 +376,20 @@ export default function Documents() {
           <div className="p-12 text-center">
             <FileText size={36} className="mx-auto mb-3 text-slate-300" />
             <p className="font-medium text-slate-600">
-              {search.trim() ? 'No matching documents' : 'No stored documents'}
+              {statusFilter === 'INDEXED'
+                ? 'No indexed documents'
+                : statusFilter === 'INDEX_FAILED'
+                  ? 'No failed documents'
+                  : search.trim()
+                    ? 'No matching documents'
+                    : 'No stored documents'}
             </p>
             <p className="mt-1 text-sm text-slate-400">
-              {search.trim() ? 'Try another filename.' : 'Choose a file to start uploading and indexing.'}
+              {statusFilter
+                ? 'Clear the status filter or try another filename.'
+                : search.trim()
+                  ? 'Try another filename.'
+                  : 'Choose a file to start uploading and indexing.'}
             </p>
           </div>
         ) : (
@@ -456,6 +494,7 @@ export default function Documents() {
         <DocumentDetailsModal
           key={selectedDocumentId}
           documentId={selectedDocumentId}
+          defaultView={settings.defaultDocumentView}
           onClose={() => setSelectedDocumentId(null)}
         />
       )}

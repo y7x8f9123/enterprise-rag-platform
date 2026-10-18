@@ -274,12 +274,14 @@ export async function listDocuments(
   query: string,
   page: number,
   size = 10,
+  status?: IndexingStatus,
 ): Promise<DocumentPageResponse> {
   const parameters = new URLSearchParams({
     query,
     page: String(page),
     size: String(size),
   })
+  if (status) parameters.set('status', status)
   const payload = await requestJson(`/api/documents?${parameters}`, {
     method: 'GET',
   })

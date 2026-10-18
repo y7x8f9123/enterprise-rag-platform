@@ -40,6 +40,24 @@ describe('DocumentDetailsModal', () => {
     expect(screen.getByText('Extracting preview…')).toBeInTheDocument()
   })
 
+  it('opens on the configured default view without changing manual tab behavior', () => {
+    detailsRequest.mockReturnValue(new Promise(() => undefined))
+    contentRequest.mockReturnValue(new Promise(() => undefined))
+    previewRequest.mockReturnValue(new Promise(() => undefined))
+
+    render(
+      <DocumentDetailsModal
+        documentId="document.txt"
+        defaultView="extracted"
+        onClose={vi.fn()}
+      />,
+    )
+
+    expect(screen.getByRole('tab', { name: 'Extracted Text' })).toHaveAttribute('aria-selected', 'true')
+    fireEvent.click(screen.getByRole('tab', { name: 'Original View' }))
+    expect(screen.getByRole('tab', { name: 'Original View' })).toHaveAttribute('aria-selected', 'true')
+  })
+
   it('shows metadata and preview API failures', async () => {
     detailsRequest.mockRejectedValue(new Error('Details request failed.'))
     contentRequest.mockRejectedValue(new Error('Original request failed.'))

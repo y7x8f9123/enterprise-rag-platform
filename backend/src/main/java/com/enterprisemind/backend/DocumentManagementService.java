@@ -104,7 +104,12 @@ public class DocumentManagementService {
         return DocumentResponse.from(metadata);
     }
 
-    public DocumentPageResponse list(String query, int page, int size) {
+    public DocumentPageResponse list(
+            String query,
+            int page,
+            int size,
+            String status
+    ) {
         if (page < 0) {
             throw new ResponseStatusException(
                     HttpStatus.BAD_REQUEST,
@@ -124,12 +129,39 @@ public class DocumentManagementService {
                 Sort.by(Sort.Direction.DESC, "createdAt")
         );
         String normalized = query == null ? "" : query.trim();
-        Page<DocumentMetadata> result = normalized.isEmpty()
-                ? repository.findAll(pageable)
-                : repository.findByOriginalNameContainingIgnoreCase(
-                        normalized,
-                        pageable
-                );
+        String normalizedStatus = status == null
+                ? ""
+                : status.trim().toUpperCase(Locale.ROOT);
+        if (!normalizedStatus.isEmpty()
+                && !Set.of("INDEXED", "INDEX_FAILED")
+                        .contains(normalizedStatus)) {
+            throw new ResponseStatusException(
+                    HttpStatus.BAD_REQUEST,
+                    "status must be INDEXED or INDEX_FAILED"
+            );
+        }
+
+        Page<DocumentMetadata> result;
+        if (normalizedStatus.isEmpty()) {
+            result = normalized.isEmpty()
+                    ? repository.findAll(pageable)
+                    : repository.findByOriginalNameContainingIgnoreCase(
+                            normalized,
+                            pageable
+                    );
+        } else {
+            result = normalized.isEmpty()
+                    ? repository.findByIndexingStatus(
+                            normalizedStatus,
+                            pageable
+                    )
+                    : repository
+                            .findByOriginalNameContainingIgnoreCaseAndIndexingStatus(
+                                    normalized,
+                                    normalizedStatus,
+                                    pageable
+                            );
+        }
 
         return new DocumentPageResponse(
                 result.getContent().stream()
