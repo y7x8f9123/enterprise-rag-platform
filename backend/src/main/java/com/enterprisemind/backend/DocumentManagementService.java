@@ -168,7 +168,7 @@ public class DocumentManagementService {
         } catch (RestClientResponseException exception) {
             HttpStatus status = exception.getStatusCode().value() == 415
                     ? HttpStatus.UNSUPPORTED_MEDIA_TYPE
-                    : HttpStatus.UNPROCESSABLE_ENTITY;
+                    : HttpStatus.UNPROCESSABLE_CONTENT;
             throw new ResponseStatusException(
                     status,
                     "Document preview could not be parsed",
@@ -176,7 +176,7 @@ public class DocumentManagementService {
             );
         } catch (RuntimeException exception) {
             throw new ResponseStatusException(
-                    HttpStatus.UNPROCESSABLE_ENTITY,
+                    HttpStatus.UNPROCESSABLE_CONTENT,
                     "Document preview could not be parsed",
                     exception
             );
