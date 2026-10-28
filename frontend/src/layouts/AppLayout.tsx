@@ -1,5 +1,5 @@
 
-import { useState, type ReactNode } from 'react'
+import { useEffect, useState, type ReactNode } from 'react'
 import {
   BrainCircuit,
   LayoutDashboard,
@@ -19,6 +19,9 @@ interface AppLayoutProps {
   children: ReactNode
   currentPage: Page
   onNavigate: (page: Page) => void
+  onOpenSearch: () => void
+  unreadNotifications: number
+  onOpenNotifications: () => void
 }
 
 const navigation: {
@@ -36,10 +39,25 @@ export default function AppLayout({
   children,
   currentPage,
   onNavigate,
+  onOpenSearch,
+  unreadNotifications,
+  onOpenNotifications,
 }: AppLayoutProps) {
   const [sidebarOpen, setSidebarOpen] = useState(false)
 
   const activePage = navigation.find(item => item.id === currentPage)
+
+  useEffect(() => {
+    function handleKeyDown(event: KeyboardEvent) {
+      if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'k') {
+        event.preventDefault()
+        onOpenSearch()
+      }
+    }
+
+    window.addEventListener('keydown', handleKeyDown)
+    return () => window.removeEventListener('keydown', handleKeyDown)
+  }, [onOpenSearch])
 
   return (
     <div className="min-h-screen bg-slate-50">
@@ -142,8 +160,32 @@ export default function AppLayout({
           </div>
 
           <div className="flex items-center gap-4 text-slate-500">
-            <Search size={20} aria-label="Search icon" />
-            <Bell size={20} aria-label="Notifications icon" />
+            <button
+              type="button"
+              aria-label="Open global document search"
+              title="Search documents (Ctrl+K)"
+              onClick={onOpenSearch}
+              className="rounded-lg p-2 transition-colors hover:bg-slate-100 hover:text-indigo-600 focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-indigo-100"
+            >
+              <Search size={20} />
+            </button>
+            <button
+              type="button"
+              aria-label="Open notifications"
+              title="Notifications"
+              onClick={onOpenNotifications}
+              className="relative rounded-lg p-2 transition-colors hover:bg-slate-100 hover:text-indigo-600 focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-indigo-100"
+            >
+              <Bell size={20} />
+              {unreadNotifications > 0 && (
+                <span
+                  className="absolute -right-1 -top-1 flex min-h-5 min-w-5 items-center justify-center rounded-full bg-red-600 px-1 text-[10px] font-bold text-white ring-2 ring-white"
+                  aria-label={`${unreadNotifications} unread notifications`}
+                >
+                  {unreadNotifications > 99 ? '99+' : unreadNotifications}
+                </span>
+              )}
+            </button>
             <div className="flex h-9 w-9 items-center justify-center rounded-full bg-indigo-600 text-sm font-semibold text-white">
               D
             </div>

@@ -2,6 +2,9 @@ package com.enterprisemind.backend;
 
 import java.time.Duration;
 
+import tools.jackson.databind.JsonNode;
+import tools.jackson.databind.json.JsonMapper;
+
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.core.io.ByteArrayResource;
 import org.springframework.http.MediaType;
@@ -10,9 +13,12 @@ import org.springframework.stereotype.Service;
 import org.springframework.util.LinkedMultiValueMap;
 import org.springframework.util.MultiValueMap;
 import org.springframework.web.client.RestClient;
+import org.springframework.web.client.RestClientResponseException;
 
 @Service
 public class DocumentParsingService {
+
+    private static final JsonMapper ERROR_MAPPER = JsonMapper.builder().build();
 
     private final RestClient restClient;
 
@@ -71,15 +77,53 @@ public class DocumentParsingService {
         body.add("file", resource);
         body.add("document_id", documentId);
 
-        DocumentIndexResult response = restClient.post()
-                .uri("/api/documents/index")
-                .contentType(MediaType.MULTIPART_FORM_DATA)
-                .body(body)
-                .retrieve()
-                .body(DocumentIndexResult.class);
+        DocumentIndexResult response;
+        try {
+            response = restClient.post()
+                    .uri("/api/documents/index")
+                    .contentType(MediaType.MULTIPART_FORM_DATA)
+                    .body(body)
+                    .retrieve()
+                    .body(DocumentIndexResult.class);
+        } catch (RestClientResponseException exception) {
+            throw indexingException(exception);
+        }
 
         validateResponse(response, documentId);
         return response;
+    }
+
+    private static DocumentIndexingException indexingException(
+            RestClientResponseException exception
+    ) {
+        String code = "INDEXING_FAILED";
+        String message = "Document indexing failed.";
+        try {
+            JsonNode detail = ERROR_MAPPER
+                    .readTree(exception.getResponseBodyAsString())
+                    .path("detail");
+            if (detail.isObject()) {
+                String parsedCode = detail.path("code").asText("").trim();
+                String parsedMessage = detail.path("message").asText("").trim();
+                if (!parsedCode.isEmpty()) {
+                    code = parsedCode;
+                }
+                if (!parsedMessage.isEmpty()) {
+                    message = parsedMessage;
+                }
+            } else if (detail.isTextual() && !detail.asText().isBlank()) {
+                message = detail.asText();
+            }
+        } catch (Exception ignored) {
+            // Keep the bounded, user-safe fallback above. Never expose the
+            // raw upstream response or a server-side stack trace.
+        }
+        return new DocumentIndexingException(
+                exception.getStatusCode().value(),
+                code,
+                message,
+                exception
+        );
     }
 
     public DocumentPreviewResponse preview(

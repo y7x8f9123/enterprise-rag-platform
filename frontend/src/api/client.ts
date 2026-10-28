@@ -12,6 +12,7 @@ export type UploadDocumentResponse = {
   chunkCount: number | null
   indexedChunks: number | null
   createdAt: string
+  indexingErrorCode?: string
   indexingError?: string
 }
 
@@ -34,6 +35,31 @@ export type DashboardSummaryResponse = {
 export type ServiceHealthResponse = {
   status: string
   service: string
+}
+
+export type NotificationType =
+  | 'DOCUMENT_UPLOADED'
+  | 'INDEX_SUCCEEDED'
+  | 'INDEX_FAILED'
+  | 'DOCUMENT_DELETED'
+
+export type NotificationResponse = {
+  id: string
+  title: string
+  message: string
+  type: NotificationType
+  documentId: string | null
+  createdAt: string
+  read: boolean
+  documentAvailable: boolean
+}
+
+export type NotificationPageResponse = {
+  notifications: NotificationResponse[]
+  page: number
+  size: number
+  totalElements: number
+  totalPages: number
 }
 
 export type DocumentPreviewResponse = {
@@ -132,6 +158,10 @@ function parseDocument(payload: unknown): UploadDocumentResponse {
     chunkCount: response.chunkCount,
     indexedChunks: response.indexedChunks,
     createdAt: response.createdAt,
+    indexingErrorCode:
+      typeof response.indexingErrorCode === 'string'
+        ? response.indexingErrorCode
+        : undefined,
     indexingError:
       typeof response.indexingError === 'string'
         ? response.indexingError
@@ -220,6 +250,70 @@ function parseDocumentPreview(payload: unknown): DocumentPreviewResponse {
   return { text: response.text, truncated: response.truncated }
 }
 
+function parseNotification(payload: unknown): NotificationResponse {
+  if (!payload || typeof payload !== 'object') {
+    throw new Error('The notification service returned an unexpected response.')
+  }
+  const response = payload as Record<string, unknown>
+  const type = response.type
+  if (
+    typeof response.id !== 'string' ||
+    typeof response.title !== 'string' ||
+    typeof response.message !== 'string' ||
+    !['DOCUMENT_UPLOADED', 'INDEX_SUCCEEDED', 'INDEX_FAILED', 'DOCUMENT_DELETED'].includes(String(type)) ||
+    (response.documentId !== null && typeof response.documentId !== 'string') ||
+    typeof response.createdAt !== 'string' ||
+    typeof response.read !== 'boolean' ||
+    typeof response.documentAvailable !== 'boolean'
+  ) {
+    throw new Error('The notification service returned an unexpected response.')
+  }
+  return {
+    id: response.id,
+    title: response.title,
+    message: response.message,
+    type: type as NotificationType,
+    documentId: response.documentId,
+    createdAt: response.createdAt,
+    read: response.read,
+    documentAvailable: response.documentAvailable,
+  }
+}
+
+function parseNotificationPage(payload: unknown): NotificationPageResponse {
+  if (!payload || typeof payload !== 'object') {
+    throw new Error('The notification service returned an unexpected response.')
+  }
+  const response = payload as Record<string, unknown>
+  if (
+    !Array.isArray(response.notifications) ||
+    typeof response.page !== 'number' ||
+    typeof response.size !== 'number' ||
+    typeof response.totalElements !== 'number' ||
+    typeof response.totalPages !== 'number'
+  ) {
+    throw new Error('The notification service returned an unexpected response.')
+  }
+  return {
+    notifications: response.notifications.map(parseNotification),
+    page: response.page,
+    size: response.size,
+    totalElements: response.totalElements,
+    totalPages: response.totalPages,
+  }
+}
+
+function parseUnreadCount(payload: unknown): number {
+  if (!payload || typeof payload !== 'object') {
+    throw new Error('The notification service returned an unexpected response.')
+  }
+  const unreadCount = (payload as Record<string, unknown>).unreadCount
+  if (typeof unreadCount !== 'number') {
+    throw new Error('The notification service returned an unexpected response.')
+  }
+  return unreadCount
+}
+
 function isSearchResult(value: unknown): value is SearchResult {
   if (!value || typeof value !== 'object') return false
 
@@ -275,6 +369,7 @@ export async function listDocuments(
   page: number,
   size = 10,
   status?: IndexingStatus,
+  signal?: AbortSignal,
 ): Promise<DocumentPageResponse> {
   const parameters = new URLSearchParams({
     query,
@@ -284,6 +379,7 @@ export async function listDocuments(
   if (status) parameters.set('status', status)
   const payload = await requestJson(`/api/documents?${parameters}`, {
     method: 'GET',
+    signal,
   })
   return parseDocumentPage(payload)
 }
@@ -303,6 +399,16 @@ export async function deleteDocument(documentId: string): Promise<void> {
   ) {
     throw new Error('The server did not confirm document deletion.')
   }
+}
+
+export async function retryDocumentIndex(
+  documentId: string,
+): Promise<UploadDocumentResponse> {
+  const payload = await requestJson(
+    `/api/documents/${encodeURIComponent(documentId)}/retry-index`,
+    { method: 'POST' },
+  )
+  return parseDocument(payload)
 }
 
 export async function getDocumentDetails(
@@ -376,4 +482,43 @@ export async function getServiceHealth(
   const path = service === 'backend' ? '/api/health' : '/api/ai/health'
   const payload = await requestJson(path, { method: 'GET' })
   return parseServiceHealth(payload)
+}
+
+export async function listNotifications(
+  page = 0,
+  size = 20,
+  signal?: AbortSignal,
+): Promise<NotificationPageResponse> {
+  const payload = await requestJson(
+    `/api/notifications?page=${page}&size=${size}`,
+    { method: 'GET', signal },
+  )
+  return parseNotificationPage(payload)
+}
+
+export async function getUnreadNotificationCount(
+  signal?: AbortSignal,
+): Promise<number> {
+  const payload = await requestJson('/api/notifications/unread-count', {
+    method: 'GET',
+    signal,
+  })
+  return parseUnreadCount(payload)
+}
+
+export async function markNotificationRead(
+  id: string,
+): Promise<NotificationResponse> {
+  const payload = await requestJson(
+    `/api/notifications/${encodeURIComponent(id)}/read`,
+    { method: 'PATCH' },
+  )
+  return parseNotification(payload)
+}
+
+export async function markAllNotificationsRead(): Promise<number> {
+  const payload = await requestJson('/api/notifications/read-all', {
+    method: 'PATCH',
+  })
+  return parseUnreadCount(payload)
 }

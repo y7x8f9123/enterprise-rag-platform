@@ -10,6 +10,7 @@ import DocumentDetailsModal from './DocumentDetailsModal'
 vi.mock('../api/client', () => ({
   getDocumentDetails: vi.fn(),
   getDocumentContent: vi.fn(),
+  getDocumentContentUrl: vi.fn(() => '/content'),
   getDocumentDownloadUrl: vi.fn(() => '/download'),
   getDocumentPreview: vi.fn(),
 }))
@@ -71,6 +72,30 @@ describe('DocumentDetailsModal', () => {
     expect(await screen.findByText('Original request failed.')).toBeInTheDocument()
     fireEvent.click(screen.getByRole('tab', { name: 'Extracted Text' }))
     expect(await screen.findByText('Preview request failed.')).toBeInTheDocument()
+  })
+
+  it('shows the persisted indexing reason and OCR availability guidance', async () => {
+    detailsRequest.mockResolvedValue({
+      ...documentDetails('scan.pdf', 'scan.pdf'),
+      indexingStatus: 'INDEX_FAILED',
+      characters: null,
+      words: null,
+      chunkCount: null,
+      indexedChunks: null,
+      indexingErrorCode: 'NO_EXTRACTABLE_TEXT',
+      indexingError: 'No extractable text. This PDF may require OCR.',
+    })
+    contentRequest.mockResolvedValue(new Blob(['%PDF-image-only']))
+    previewRequest.mockResolvedValue({ text: '', truncated: false })
+
+    render(
+      <DocumentDetailsModal documentId="scan.pdf" onClose={vi.fn()} />,
+    )
+
+    expect(await screen.findByText(
+      'No extractable text. This PDF may require OCR.',
+    )).toBeInTheDocument()
+    expect(screen.getByText('OCR is not enabled in this version.')).toBeInTheDocument()
   })
 
   it('aborts both requests when the modal closes', async () => {

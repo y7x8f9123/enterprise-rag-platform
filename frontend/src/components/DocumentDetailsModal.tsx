@@ -162,6 +162,7 @@ export default function DocumentDetailsModal({
               <AlertCircle size={19} className="shrink-0" /> {detailsError}
             </div>
           ) : details ? (
+            <>
             <dl className="grid grid-cols-2 gap-3 sm:grid-cols-4">
               <div className="rounded-xl bg-slate-50 p-3">
                 <dt className="text-xs text-slate-500">File size</dt>
@@ -192,6 +193,19 @@ export default function DocumentDetailsModal({
                 <dd className="mt-1 text-sm font-semibold text-slate-800">{details.indexedChunks?.toLocaleString() ?? '—'}</dd>
               </div>
             </dl>
+            {details.indexingStatus === 'INDEX_FAILED' && details.indexingError && (
+              <div role="alert" className="mt-4 rounded-xl border border-orange-200 bg-orange-50 p-4 text-sm text-orange-800">
+                <p className="font-semibold">
+                  {details.indexingErrorCode === 'NO_EXTRACTABLE_TEXT'
+                    ? 'No extractable text. This PDF may require OCR.'
+                    : details.indexingError}
+                </p>
+                {details.indexingErrorCode === 'NO_EXTRACTABLE_TEXT' && (
+                  <p className="mt-1 text-xs text-orange-700">OCR is not enabled in this version.</p>
+                )}
+              </div>
+            )}
+            </>
           ) : null}
 
           <div className="mt-6">

@@ -83,6 +83,10 @@ class DeleteResponse(BaseModel):
     document_id: str
 
 
+def document_error(code: str, message: str) -> dict[str, str]:
+    return {"code": code, "message": message}
+
+
 @asynccontextmanager
 async def lifespan(application: FastAPI):
     # One client owns the Qdrant Local directory for the whole process. Qdrant
@@ -125,7 +129,10 @@ def extract_text(filename: str, content: bytes) -> str:
             except UnicodeDecodeError:
                 raise HTTPException(
                     status_code=422,
-                    detail="TXT file must use UTF-8 encoding",
+                    detail=document_error(
+                        "INVALID_TEXT_ENCODING",
+                        "TXT file must use UTF-8 encoding",
+                    ),
                 )
 
         if extension == ".pdf":
@@ -134,7 +141,10 @@ def extract_text(filename: str, content: bytes) -> str:
             if reader.is_encrypted:
                 raise HTTPException(
                     status_code=422,
-                    detail="Encrypted PDFs are not supported",
+                    detail=document_error(
+                        "ENCRYPTED_PDF",
+                        "Encrypted PDFs are not supported",
+                    ),
                 )
 
             pages = [page.extract_text() or "" for page in reader.pages]
@@ -160,12 +170,18 @@ def extract_text(filename: str, content: bytes) -> str:
     except Exception:
         raise HTTPException(
             status_code=422,
-            detail="Unable to parse document",
+            detail=document_error(
+                "DOCUMENT_PARSE_FAILED",
+                "Unable to parse document",
+            ),
         )
 
     raise HTTPException(
         status_code=415,
-        detail="Unsupported file format",
+        detail=document_error(
+            "UNSUPPORTED_FILE_FORMAT",
+            "Unsupported file format",
+        ),
     )
 
 
@@ -201,9 +217,17 @@ def parse_and_chunk(
 ) -> tuple[str, list[dict]]:
     text = extract_text(filename, content)
     if not text.strip():
+        extension = Path(filename).suffix.lower()
+        if extension == ".pdf":
+            message = (
+                "No extractable text found. This PDF may be scanned or "
+                "image-based and may require OCR."
+            )
+        else:
+            message = "No extractable text found in this document."
         raise HTTPException(
             status_code=422,
-            detail="No extractable text found",
+            detail=document_error("NO_EXTRACTABLE_TEXT", message),
         )
 
     chunks = split_text(

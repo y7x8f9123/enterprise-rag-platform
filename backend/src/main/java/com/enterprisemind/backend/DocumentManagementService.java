@@ -11,6 +11,9 @@ import java.time.Instant;
 import java.util.Locale;
 import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentMap;
+import java.util.concurrent.locks.ReentrantLock;
 import java.util.regex.Pattern;
 
 import org.slf4j.Logger;
@@ -36,6 +39,8 @@ public class DocumentManagementService {
             LoggerFactory.getLogger(DocumentManagementService.class);
     private static final Set<String> ALLOWED = Set.of("pdf", "docx", "txt");
     private static final long MAX_FILE_SIZE = 20L * 1024 * 1024;
+    private static final String NO_EXTRACTABLE_TEXT =
+            "No extractable text. This PDF may require OCR.";
     private static final Pattern DOCUMENT_ID = Pattern.compile(
             "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}\\.(pdf|docx|txt)$"
     );
@@ -43,15 +48,20 @@ public class DocumentManagementService {
     private final Path storageRoot;
     private final DocumentParsingService parsingService;
     private final DocumentMetadataRepository repository;
+    private final NotificationService notifications;
+    private final ConcurrentMap<String, ReentrantLock> documentLocks =
+            new ConcurrentHashMap<>();
 
     public DocumentManagementService(
             @Value("${app.storage.location}") String location,
             DocumentParsingService parsingService,
-            DocumentMetadataRepository repository
+            DocumentMetadataRepository repository,
+            NotificationService notifications
     ) throws IOException {
         storageRoot = Path.of(location).toAbsolutePath().normalize();
         this.parsingService = parsingService;
         this.repository = repository;
+        this.notifications = notifications;
         Files.createDirectories(storageRoot);
     }
 
@@ -81,6 +91,12 @@ public class DocumentManagementService {
             Files.deleteIfExists(target);
             throw exception;
         }
+        notifySafely(
+                NotificationType.DOCUMENT_UPLOADED,
+                documentId,
+                originalName,
+                false
+        );
 
         try {
             byte[] content = Files.readAllBytes(target);
@@ -91,9 +107,22 @@ public class DocumentManagementService {
             );
             metadata.markIndexed(indexed);
             metadata = repository.save(metadata);
+            notifySafely(
+                    NotificationType.INDEX_SUCCEEDED,
+                    documentId,
+                    originalName,
+                    false
+            );
         } catch (Exception exception) {
-            metadata.markIndexFailed();
+            IndexingFailure failure = indexingFailure(exception);
+            metadata.markIndexFailed(failure.code(), failure.message());
             metadata = repository.save(metadata);
+            notifyIndexFailureSafely(
+                    documentId,
+                    originalName,
+                    NotificationType.INDEX_FAILED.name() + ":" + documentId,
+                    failure.message()
+            );
             LOGGER.warn(
                     "AI indexing failed for documentId={} cause={}",
                     documentId,
@@ -177,6 +206,90 @@ public class DocumentManagementService {
     @Transactional(readOnly = true)
     public DocumentResponse details(String documentId) {
         return DocumentResponse.from(findDocument(documentId));
+    }
+
+    public DocumentResponse retryIndex(String documentId) {
+        validateDocumentId(documentId);
+        ReentrantLock lock = acquireDocumentLock(documentId);
+        try {
+            DocumentMetadata metadata = findDocument(documentId);
+            if (!"INDEX_FAILED".equals(metadata.getIndexingStatus())) {
+                throw new ResponseStatusException(
+                        HttpStatus.CONFLICT,
+                        "Only documents with failed indexing can be retried"
+                );
+            }
+
+            StoredDocumentResource stored = original(documentId);
+            byte[] content;
+            try {
+                content = stored.resource().getContentAsByteArray();
+            } catch (IOException exception) {
+                throw new ResponseStatusException(
+                        HttpStatus.INTERNAL_SERVER_ERROR,
+                        "Stored document could not be read",
+                        exception
+                );
+            }
+
+            String retryEvent = "RETRY:" + UUID.randomUUID();
+            try {
+                DocumentIndexResult indexed = parsingService.index(
+                        metadata.getOriginalName(),
+                        content,
+                        documentId
+                );
+                metadata.markIndexed(indexed);
+                metadata = repository.saveAndFlush(metadata);
+                notifyRetrySafely(
+                        NotificationType.INDEX_SUCCEEDED,
+                        documentId,
+                        metadata.getOriginalName(),
+                        retryEvent
+                );
+                return DocumentResponse.from(metadata);
+            } catch (DocumentIndexingException exception) {
+                IndexingFailure failure = indexingFailure(exception);
+                persistRetryFailure(metadata, retryEvent, failure);
+                HttpStatus status = HttpStatus.resolve(exception.getStatusCode());
+                throw new ResponseStatusException(
+                        status == null ? HttpStatus.BAD_GATEWAY : status,
+                        failure.message(),
+                        exception
+                );
+            } catch (ResourceAccessException exception) {
+                IndexingFailure failure = indexingFailure(exception);
+                persistRetryFailure(metadata, retryEvent, failure);
+                throw new ResponseStatusException(
+                        HttpStatus.SERVICE_UNAVAILABLE,
+                        failure.message(),
+                        exception
+                );
+            } catch (RestClientResponseException exception) {
+                IndexingFailure failure = indexingFailure(exception);
+                persistRetryFailure(metadata, retryEvent, failure);
+                HttpStatus status = exception.getStatusCode().value() == 422
+                        ? HttpStatus.UNPROCESSABLE_CONTENT
+                        : exception.getStatusCode().value() == 503
+                                ? HttpStatus.SERVICE_UNAVAILABLE
+                                : HttpStatus.BAD_GATEWAY;
+                throw new ResponseStatusException(
+                        status,
+                        failure.message(),
+                        exception
+                );
+            } catch (RuntimeException exception) {
+                IndexingFailure failure = indexingFailure(exception);
+                persistRetryFailure(metadata, retryEvent, failure);
+                throw new ResponseStatusException(
+                        HttpStatus.BAD_GATEWAY,
+                        failure.message(),
+                        exception
+                );
+            }
+        } finally {
+            releaseDocumentLock(lock);
+        }
     }
 
     @Transactional(readOnly = true)
@@ -290,7 +403,17 @@ public class DocumentManagementService {
     }
 
     @Transactional(rollbackFor = Exception.class)
-    public synchronized void delete(String documentId) throws IOException {
+    public void delete(String documentId) throws IOException {
+        validateDocumentId(documentId);
+        ReentrantLock lock = acquireDocumentLock(documentId);
+        try {
+            deleteLocked(documentId);
+        } finally {
+            releaseDocumentLock(lock);
+        }
+    }
+
+    protected void deleteLocked(String documentId) throws IOException {
         DocumentMetadata metadata = findDocument(documentId);
         Path original = resolveStoredPath(metadata.getStoragePath());
         Path staged = resolveStoredPath(
@@ -312,6 +435,12 @@ public class DocumentManagementService {
                 Files.delete(staged);
                 moved = false;
             }
+            notifySafely(
+                    NotificationType.DOCUMENT_DELETED,
+                    documentId,
+                    metadata.getOriginalName(),
+                    true
+            );
         } catch (Exception exception) {
             if (moved && Files.exists(staged)) {
                 try {
@@ -343,6 +472,43 @@ public class DocumentManagementService {
         }
     }
 
+    private void persistRetryFailure(
+            DocumentMetadata metadata,
+            String retryEvent,
+            IndexingFailure failure
+    ) {
+        metadata.markIndexFailed(failure.code(), failure.message());
+        repository.saveAndFlush(metadata);
+        notifyIndexFailureSafely(
+                metadata.getDocumentId(),
+                metadata.getOriginalName(),
+                retryEvent + ":" + NotificationType.INDEX_FAILED.name(),
+                failure.message()
+        );
+        LOGGER.warn(
+                "Indexing retry failed for documentId={}",
+                metadata.getDocumentId()
+        );
+    }
+
+    private ReentrantLock acquireDocumentLock(String documentId) {
+        ReentrantLock lock = documentLocks.computeIfAbsent(
+                documentId,
+                ignored -> new ReentrantLock()
+        );
+        if (!lock.tryLock()) {
+            throw new ResponseStatusException(
+                    HttpStatus.CONFLICT,
+                    "A document operation is already in progress"
+            );
+        }
+        return lock;
+    }
+
+    private void releaseDocumentLock(ReentrantLock lock) {
+        lock.unlock();
+    }
+
     private static void move(Path source, Path target) throws IOException {
         try {
             Files.move(source, target, StandardCopyOption.ATOMIC_MOVE);
@@ -350,6 +516,97 @@ public class DocumentManagementService {
             Files.move(source, target);
         }
     }
+
+    private void notifySafely(
+            NotificationType type,
+            String documentId,
+            String originalName,
+            boolean afterCommit
+    ) {
+        try {
+            if (afterCommit) {
+                notifications.recordAfterCommit(type, documentId, originalName);
+            } else {
+                notifications.recordSafely(type, documentId, originalName);
+            }
+        } catch (RuntimeException exception) {
+            LOGGER.warn(
+                    "Notification dispatch failed for type={} documentId={} cause={}",
+                    type,
+                    documentId,
+                    exception.getClass().getSimpleName()
+            );
+        }
+    }
+
+    private void notifyRetrySafely(
+            NotificationType type,
+            String documentId,
+            String originalName,
+            String retryEvent
+    ) {
+        try {
+            notifications.recordSafely(
+                    type,
+                    documentId,
+                    originalName,
+                    retryEvent + ":" + type.name()
+            );
+        } catch (RuntimeException exception) {
+            LOGGER.warn(
+                    "Retry notification dispatch failed for type={} "
+                            + "documentId={} cause={}",
+                    type,
+                    documentId,
+                    exception.getClass().getSimpleName()
+            );
+        }
+    }
+
+    private void notifyIndexFailureSafely(
+            String documentId,
+            String originalName,
+            String eventKey,
+            String failureReason
+    ) {
+        try {
+            notifications.recordIndexFailureSafely(
+                    documentId,
+                    originalName,
+                    eventKey,
+                    failureReason
+            );
+        } catch (RuntimeException exception) {
+            LOGGER.warn(
+                    "Index failure notification dispatch failed for "
+                            + "documentId={} cause={}",
+                    documentId,
+                    exception.getClass().getSimpleName()
+            );
+        }
+    }
+
+    private static IndexingFailure indexingFailure(Throwable exception) {
+        if (exception instanceof DocumentIndexingException indexingException) {
+            String code = indexingException.getErrorCode();
+            String message = "NO_EXTRACTABLE_TEXT".equals(code)
+                    ? NO_EXTRACTABLE_TEXT
+                    : indexingException.getSafeMessage();
+            return new IndexingFailure(code, message);
+        }
+        if (exception instanceof ResourceAccessException) {
+            return new IndexingFailure(
+                    "AI_SERVICE_UNAVAILABLE",
+                    "AI indexing service is unavailable."
+            );
+        }
+        return new IndexingFailure(
+                "INDEXING_FAILED",
+                "Document indexing failed."
+        );
+    }
+
+    private record IndexingFailure(String code, String message) { }
 
     private void validateUpload(MultipartFile file) {
         if (file.isEmpty()) {

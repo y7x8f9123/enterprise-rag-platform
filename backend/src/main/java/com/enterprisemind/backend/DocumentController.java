@@ -52,6 +52,11 @@ public class DocumentController {
         return documents.details(documentId);
     }
 
+    @PostMapping("/{documentId}/retry-index")
+    public DocumentResponse retryIndex(@PathVariable String documentId) {
+        return documents.retryIndex(documentId);
+    }
+
     @GetMapping("/{documentId}/preview")
     public DocumentPreviewResponse preview(@PathVariable String documentId) {
         return documents.preview(documentId);

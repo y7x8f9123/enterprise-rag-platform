@@ -14,6 +14,7 @@ public record DocumentResponse(
         Integer chunkCount,
         Integer indexedChunks,
         Instant createdAt,
+        String indexingErrorCode,
         String indexingError
 ) {
     public static DocumentResponse from(DocumentMetadata document) {
@@ -29,9 +30,27 @@ public record DocumentResponse(
                 document.getChunkCount(),
                 document.getIndexedChunks(),
                 document.getCreatedAt(),
-                "INDEX_FAILED".equals(document.getIndexingStatus())
-                        ? "Document was stored but indexing failed"
-                        : null
+                failedValue(
+                        document,
+                        document.getIndexingErrorCode(),
+                        "INDEXING_FAILED"
+                ),
+                failedValue(
+                        document,
+                        document.getIndexingError(),
+                        "Document was stored but indexing failed."
+                )
         );
+    }
+
+    private static String failedValue(
+            DocumentMetadata document,
+            String value,
+            String fallback
+    ) {
+        if (!"INDEX_FAILED".equals(document.getIndexingStatus())) {
+            return null;
+        }
+        return value == null || value.isBlank() ? fallback : value;
     }
 }

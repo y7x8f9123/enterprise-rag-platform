@@ -16,6 +16,7 @@ import {
   Eye,
   Info,
   LoaderCircle,
+  RotateCcw,
   Search,
   Trash2,
   UploadCloud,
@@ -26,6 +27,7 @@ import { useAppSettings } from '../settings/useAppSettings'
 import {
   deleteDocument as deleteDocumentRequest,
   listDocuments,
+  retryDocumentIndex,
   uploadDocument as uploadDocumentRequest,
   type UploadDocumentResponse,
   type IndexingStatus,
@@ -33,6 +35,7 @@ import {
 
 type UploadStatus =
   | 'uploading'
+  | 'retrying'
   | 'stored'
   | 'indexed'
   | 'index_failed'
@@ -52,6 +55,7 @@ type DisplayDocument = {
   indexedChunks?: number | null
   error?: string
   deleting?: boolean
+  retrying?: boolean
 }
 
 const allowedExtensions = ['pdf', 'docx', 'txt']
@@ -59,6 +63,11 @@ const maxSize = 20 * 1024 * 1024
 const statusPresentation = {
   uploading: {
     label: 'Uploading',
+    className: 'bg-amber-50 text-amber-700 ring-amber-200',
+    icon: LoaderCircle,
+  },
+  retrying: {
+    label: 'Retrying',
     className: 'bg-amber-50 text-amber-700 ring-amber-200',
     icon: LoaderCircle,
   },
@@ -111,7 +120,9 @@ function fromResponse(response: UploadDocumentResponse): DisplayDocument {
     words: response.words,
     chunkCount: response.chunkCount,
     indexedChunks: response.indexedChunks,
-    error: response.indexingError,
+    error: response.indexingErrorCode === 'NO_EXTRACTABLE_TEXT'
+      ? 'No extractable text. This PDF may require OCR.'
+      : response.indexingError,
   }
 }
 
@@ -124,7 +135,7 @@ function DocumentStatus({ status }: { status: UploadStatus }) {
     >
       <Icon
         size={15}
-        className={status === 'uploading' ? 'animate-spin' : undefined}
+        className={status === 'uploading' || status === 'retrying' ? 'animate-spin' : undefined}
       />
       {presentation.label}
     </span>
@@ -133,12 +144,13 @@ function DocumentStatus({ status }: { status: UploadStatus }) {
 
 type Props = {
   initialStatusFilter?: IndexingStatus
+  initialQuery?: string
 }
 
-export default function Documents({ initialStatusFilter }: Props) {
+export default function Documents({ initialStatusFilter, initialQuery = '' }: Props) {
   const { settings } = useAppSettings()
   const [documents, setDocuments] = useState<DisplayDocument[]>([])
-  const [search, setSearch] = useState('')
+  const [search, setSearch] = useState(initialQuery)
   const [statusFilter, setStatusFilter] = useState<IndexingStatus | undefined>(
     initialStatusFilter,
   )
@@ -279,8 +291,44 @@ export default function Documents({ initialStatusFilter }: Props) {
     }
   }
 
+  async function retryIndexing(document: DisplayDocument) {
+    if (!document.serverId || document.status !== 'index_failed' || document.retrying) {
+      return
+    }
+    setDocuments(previous => previous.map(item =>
+      item.id === document.id
+        ? { ...item, retrying: true, error: undefined }
+        : item,
+    ))
+    try {
+      const result = await retryDocumentIndex(document.serverId)
+      if (statusFilter) {
+        await loadDocuments(page, search.trim())
+      } else {
+        setDocuments(previous => previous.map(item =>
+          item.id === document.id ? fromResponse(result) : item,
+        ))
+      }
+    } catch (requestError) {
+      setDocuments(previous => previous.map(item =>
+        item.id === document.id
+          ? {
+              ...item,
+              retrying: false,
+              status: 'index_failed',
+              error: requestError instanceof Error
+                ? requestError.message
+                : 'Indexing retry failed.',
+            }
+          : item,
+      ))
+    }
+  }
+
   const indexedCount = documents.filter(item => item.status === 'indexed').length
-  const processingCount = documents.filter(item => item.status === 'uploading').length
+  const processingCount = documents.filter(
+    item => item.status === 'uploading' || item.retrying,
+  ).length
   const attentionCount = documents.filter(
     item => item.status === 'index_failed' || item.status === 'failed',
   ).length
@@ -425,7 +473,21 @@ export default function Documents({ initialStatusFilter }: Props) {
                     </div>
                   </div>
                   <div className="flex items-center justify-between gap-2 sm:justify-end">
-                    <DocumentStatus status={document.status} />
+                    <DocumentStatus status={document.retrying ? 'retrying' : document.status} />
+                    {document.status === 'index_failed' && document.serverId && (
+                      <button
+                        type="button"
+                        disabled={document.retrying}
+                        onClick={() => void retryIndexing(document)}
+                        aria-label={`Retry indexing ${document.originalName}`}
+                        className="inline-flex items-center gap-1.5 rounded-lg border border-orange-200 bg-orange-50 px-3 py-2 text-xs font-semibold text-orange-700 hover:bg-orange-100 focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-orange-100 disabled:cursor-not-allowed disabled:opacity-60"
+                      >
+                        {document.retrying
+                          ? <LoaderCircle size={15} className="animate-spin" />
+                          : <RotateCcw size={15} />}
+                        {document.retrying ? 'Retrying…' : 'Retry Indexing'}
+                      </button>
+                    )}
                     {document.serverId && (
                       <button
                         type="button"
@@ -437,7 +499,7 @@ export default function Documents({ initialStatusFilter }: Props) {
                         <Eye size={19} />
                       </button>
                     )}
-                    <button type="button" disabled={document.deleting || document.status === 'uploading'}
+                    <button type="button" disabled={document.deleting || document.retrying || document.status === 'uploading'}
                       aria-label={`Delete ${document.originalName}`}
                       title={document.serverId ? 'Permanently delete document' : 'Dismiss failed upload'}
                       onClick={() => void removeDocument(document)}

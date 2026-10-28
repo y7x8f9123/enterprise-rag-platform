@@ -213,6 +213,47 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["text"], "First page\n\nSecond page")
 
+    def test_pdf_with_text_layer_indexes_even_when_it_contains_images(self):
+        page = MagicMock()
+        page.extract_text.return_value = "Readable policy text"
+        page.images = [MagicMock()]
+        reader = MagicMock(is_encrypted=False, pages=[page])
+
+        with patch.object(main, "PdfReader", return_value=reader):
+            response = self.client.post(
+                "/api/documents/index",
+                data={"document_id": "document-with-image.pdf"},
+                files={"file": ("policy.pdf", b"%PDF-test", "application/pdf")},
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["status"], "INDEXED")
+        self.assertEqual(len(FakeVectorStore.instances[0].index_calls), 1)
+
+    def test_image_only_and_whitespace_pdf_return_machine_readable_error(self):
+        for extracted_text in (None, "  \n\t  "):
+            with self.subTest(extracted_text=extracted_text):
+                page = MagicMock()
+                page.extract_text.return_value = extracted_text
+                reader = MagicMock(is_encrypted=False, pages=[page])
+
+                with patch.object(main, "PdfReader", return_value=reader):
+                    response = self.client.post(
+                        "/api/documents/index",
+                        data={"document_id": "image-only.pdf"},
+                        files={"file": ("scan.pdf", b"%PDF-test", "application/pdf")},
+                    )
+
+                self.assertEqual(response.status_code, 422)
+                self.assertEqual(response.json()["detail"], {
+                    "code": "NO_EXTRACTABLE_TEXT",
+                    "message": (
+                        "No extractable text found. This PDF may be scanned or "
+                        "image-based and may require OCR."
+                    ),
+                })
+                self.assertEqual(FakeVectorStore.instances[0].index_calls, [])
+
     def test_docx_preview_includes_paragraphs_and_tables(self):
         document = Document()
         document.add_paragraph("Policy heading")
@@ -249,7 +290,10 @@ class ApiTests(unittest.TestCase):
             files={"file": ("broken.pdf", b"not a pdf", "application/pdf")},
         )
         self.assertEqual(broken.status_code, 422)
-        self.assertEqual(broken.json()["detail"], "Unable to parse document")
+        self.assertEqual(broken.json()["detail"], {
+            "code": "DOCUMENT_PARSE_FAILED",
+            "message": "Unable to parse document",
+        })
 
 
 if __name__ == "__main__":

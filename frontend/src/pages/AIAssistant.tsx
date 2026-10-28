@@ -21,8 +21,12 @@ function formatScore(score: number) {
   return `${(score * 100).toFixed(1)}%`
 }
 
-export default function AIAssistant() {
-  const [query, setQuery] = useState('')
+type Props = {
+  initialQuery?: string
+}
+
+export default function AIAssistant({ initialQuery = '' }: Props) {
+  const [query, setQuery] = useState(initialQuery)
   const [limit, setLimit] = useState<SearchLimit>(3)
   const [state, setState] = useState<SearchState>('idle')
   const [results, setResults] = useState<SearchResult[]>([])

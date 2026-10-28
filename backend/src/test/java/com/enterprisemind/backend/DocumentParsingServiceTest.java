@@ -92,6 +92,52 @@ class DocumentParsingServiceTest {
     }
 
     @Test
+    void preservesMachineReadableNoExtractableTextError() throws Exception {
+        startServer(exchange -> sendJson(exchange, 422, """
+                {
+                  "detail": {
+                    "code": "NO_EXTRACTABLE_TEXT",
+                    "message": "No extractable text found. This PDF may be scanned or image-based and may require OCR."
+                  }
+                }
+                """));
+
+        DocumentIndexingException exception = assertThrows(
+                DocumentIndexingException.class,
+                () -> createService().index(
+                        "scan.pdf",
+                        "%PDF-image-only".getBytes(StandardCharsets.UTF_8),
+                        "spring-id.pdf"
+                )
+        );
+
+        assertEquals(422, exception.getStatusCode());
+        assertEquals("NO_EXTRACTABLE_TEXT", exception.getErrorCode());
+        assertEquals(
+                "No extractable text found. This PDF may be scanned or "
+                        + "image-based and may require OCR.",
+                exception.getSafeMessage()
+        );
+    }
+
+    @Test
+    void malformedErrorResponseUsesSafeFallback() throws Exception {
+        startServer(exchange -> sendJson(exchange, 422, "not-json"));
+
+        DocumentIndexingException exception = assertThrows(
+                DocumentIndexingException.class,
+                () -> createService().index(
+                        "broken.pdf",
+                        "not-a-pdf".getBytes(StandardCharsets.UTF_8),
+                        "spring-id.pdf"
+                )
+        );
+
+        assertEquals("INDEXING_FAILED", exception.getErrorCode());
+        assertEquals("Document indexing failed.", exception.getSafeMessage());
+    }
+
+    @Test
     void rejectsResponseWithDifferentDocumentId() throws Exception {
         startServer(exchange -> sendJson(exchange, 200, """
                 {

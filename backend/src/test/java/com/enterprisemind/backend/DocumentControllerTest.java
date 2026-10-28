@@ -9,7 +9,9 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doThrow;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.reset;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.delete;
@@ -25,6 +27,9 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Instant;
 import java.util.UUID;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
 
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -37,6 +42,7 @@ import org.springframework.http.HttpHeaders;
 import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
 import org.springframework.test.context.bean.override.mockito.MockitoBean;
+import org.springframework.test.context.bean.override.mockito.MockitoSpyBean;
 import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.web.client.ResourceAccessException;
 import org.springframework.web.server.ResponseStatusException;
@@ -71,14 +77,21 @@ class DocumentControllerTest {
     DocumentMetadataRepository repository;
 
     @Autowired
+    NotificationRepository notificationRepository;
+
+    @Autowired
     DocumentManagementService managementService;
 
     @MockitoBean
     DocumentParsingService parsingService;
 
+    @MockitoSpyBean
+    NotificationService notificationService;
+
     @BeforeEach
     void resetState() throws Exception {
-        reset(parsingService);
+        reset(parsingService, notificationService);
+        notificationRepository.deleteAll();
         repository.deleteAll();
         try (var files = Files.list(storageDirectory)) {
             for (Path path : files.toList()) {
@@ -117,6 +130,15 @@ class DocumentControllerTest {
                 .split("\\\"")[0];
         assertTrue(Files.exists(storageDirectory.resolve(documentId)));
         assertTrue(repository.existsById(documentId));
+        assertEquals(
+                java.util.Set.of(
+                        NotificationType.DOCUMENT_UPLOADED,
+                        NotificationType.INDEX_SUCCEEDED
+                ),
+                notificationRepository.findAll().stream()
+                        .map(AppNotification::getType)
+                        .collect(java.util.stream.Collectors.toSet())
+        );
 
         mockMvc.perform(get("/api/documents")
                         .param("query", "HAND")
@@ -149,6 +171,15 @@ class DocumentControllerTest {
                 storageDirectory.resolve(stored.getStoragePath())
         ));
         assertEquals("INDEX_FAILED", stored.getIndexingStatus());
+        assertEquals(
+                java.util.Set.of(
+                        NotificationType.DOCUMENT_UPLOADED,
+                        NotificationType.INDEX_FAILED
+                ),
+                notificationRepository.findAll().stream()
+                        .map(AppNotification::getType)
+                        .collect(java.util.stream.Collectors.toSet())
+        );
     }
 
     @Test
@@ -211,6 +242,13 @@ class DocumentControllerTest {
         verify(parsingService).delete(stored.getDocumentId());
         assertFalse(repository.existsById(stored.getDocumentId()));
         assertFalse(Files.exists(storedPath));
+        assertTrue(notificationRepository.findAll().stream().anyMatch(
+                notification -> notification.getType()
+                        == NotificationType.DOCUMENT_DELETED
+                        && notification.getDocumentId().equals(
+                                stored.getDocumentId()
+                        )
+        ));
     }
 
     @Test
@@ -238,6 +276,257 @@ class DocumentControllerTest {
         assertTrue(repository.existsById(stored.getDocumentId()));
         assertTrue(Files.exists(storedPath));
         assertArrayEquals(before, Files.readAllBytes(storedPath));
+        assertFalse(notificationRepository.findAll().stream().anyMatch(
+                notification -> notification.getType()
+                        == NotificationType.DOCUMENT_DELETED
+        ));
+    }
+
+    @Test
+    void failedDocumentCanRetryIndexingWithoutChangingIdentityOrDuplicatingVectors()
+            throws Exception {
+        String documentId = storeDocument(
+                "retry.txt",
+                "retry content".getBytes()
+        );
+        when(parsingService.index(
+                eq("retry.txt"),
+                any(byte[].class),
+                eq(documentId)
+        )).thenReturn(new DocumentIndexResult(
+                "INDEXED", documentId, 13, 2, 2, 2
+        ));
+
+        mockMvc.perform(org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post(
+                        "/api/documents/{documentId}/retry-index",
+                        documentId
+                ))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.documentId").value(documentId))
+                .andExpect(jsonPath("$.indexingStatus").value("INDEXED"))
+                .andExpect(jsonPath("$.chunkCount").value(2))
+                .andExpect(jsonPath("$.indexedChunks").value(2));
+
+        assertEquals(1, repository.count());
+        assertEquals(
+                "INDEXED",
+                repository.findById(documentId).orElseThrow()
+                        .getIndexingStatus()
+        );
+        assertTrue(Files.exists(storageDirectory.resolve(documentId)));
+        verify(parsingService, times(1)).index(
+                eq("retry.txt"),
+                any(byte[].class),
+                eq(documentId)
+        );
+        verify(parsingService, never()).delete(documentId);
+        assertEquals(
+                1,
+                notificationRepository.findAll().stream()
+                        .filter(notification -> notification.getType()
+                                == NotificationType.INDEX_SUCCEEDED)
+                        .count()
+        );
+
+        mockMvc.perform(get("/api/dashboard/summary"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.totalDocuments").value(1))
+                .andExpect(jsonPath("$.indexedDocuments").value(1))
+                .andExpect(jsonPath("$.failedDocuments").value(0))
+                .andExpect(jsonPath("$.totalChunks").value(2));
+    }
+
+    @Test
+    void retryFailureKeepsDocumentAndCreatesFailureNotification()
+            throws Exception {
+        String documentId = storeDocument(
+                "offline-retry.txt",
+                "content".getBytes()
+        );
+        when(parsingService.index(anyString(), any(byte[].class), eq(documentId)))
+                .thenThrow(new ResourceAccessException("offline"));
+
+        mockMvc.perform(org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post(
+                        "/api/documents/{documentId}/retry-index",
+                        documentId
+                ))
+                .andExpect(status().isServiceUnavailable());
+
+        assertEquals(
+                "INDEX_FAILED",
+                repository.findById(documentId).orElseThrow()
+                        .getIndexingStatus()
+        );
+        assertTrue(Files.exists(storageDirectory.resolve(documentId)));
+        assertTrue(notificationRepository.findAll().stream().anyMatch(
+                notification -> notification.getType()
+                        == NotificationType.INDEX_FAILED
+                        && notification.getDocumentId().equals(documentId)
+        ));
+    }
+
+    @Test
+    void scannedPdfFailureReasonIsPersistedAndUpdatedOnRetry()
+            throws Exception {
+        String documentId = storeDocument(
+                "scanned.pdf",
+                "%PDF-image-only".getBytes()
+        );
+        DocumentMetadata metadata = repository.findById(documentId).orElseThrow();
+        metadata.markIndexFailed("INDEXING_FAILED", "Previous failure.");
+        repository.saveAndFlush(metadata);
+        when(parsingService.index(
+                eq("scanned.pdf"),
+                any(byte[].class),
+                eq(documentId)
+        )).thenThrow(new DocumentIndexingException(
+                422,
+                "NO_EXTRACTABLE_TEXT",
+                "No extractable text found. This PDF may be scanned or "
+                        + "image-based and may require OCR.",
+                null
+        ));
+
+        mockMvc.perform(org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post(
+                        "/api/documents/{documentId}/retry-index",
+                        documentId
+                ))
+                .andExpect(status().isUnprocessableContent());
+
+        DocumentMetadata failed = repository.findById(documentId).orElseThrow();
+        assertEquals("INDEX_FAILED", failed.getIndexingStatus());
+        assertEquals("NO_EXTRACTABLE_TEXT", failed.getIndexingErrorCode());
+        assertEquals(
+                "No extractable text. This PDF may require OCR.",
+                failed.getIndexingError()
+        );
+        assertTrue(Files.exists(storageDirectory.resolve(documentId)));
+
+        mockMvc.perform(get("/api/documents/{documentId}", documentId))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.indexingErrorCode")
+                        .value("NO_EXTRACTABLE_TEXT"))
+                .andExpect(jsonPath("$.indexingError")
+                        .value("No extractable text. This PDF may require OCR."));
+        assertTrue(notificationRepository.findAll().stream().anyMatch(
+                notification -> notification.getType()
+                        == NotificationType.INDEX_FAILED
+                        && notification.getMessage().contains(
+                                "No extractable text. This PDF may require OCR."
+                        )
+        ));
+    }
+
+    @Test
+    void retryRejectsIndexedMissingInvalidAndMissingFileDocuments()
+            throws Exception {
+        String indexedId = storeDocument("indexed.txt", "content".getBytes());
+        DocumentMetadata indexed = repository.findById(indexedId).orElseThrow();
+        indexed.markIndexed(new DocumentIndexResult(
+                "INDEXED", indexedId, 7, 1, 1, 1
+        ));
+        repository.saveAndFlush(indexed);
+
+        mockMvc.perform(org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post(
+                        "/api/documents/{documentId}/retry-index",
+                        indexedId
+                ))
+                .andExpect(status().isConflict());
+        mockMvc.perform(org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post(
+                        "/api/documents/{documentId}/retry-index",
+                        UUID.randomUUID() + ".txt"
+                ))
+                .andExpect(status().isNotFound());
+        mockMvc.perform(org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post(
+                        "/api/documents/{documentId}/retry-index",
+                        "not-a-valid-id.txt"
+                ))
+                .andExpect(status().isBadRequest());
+
+        String missingFileId = storeDocument(
+                "missing-retry.txt",
+                "content".getBytes()
+        );
+        Files.delete(storageDirectory.resolve(missingFileId));
+        mockMvc.perform(org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post(
+                        "/api/documents/{documentId}/retry-index",
+                        missingFileId
+                ))
+                .andExpect(status().isNotFound());
+        verify(parsingService, never()).index(
+                anyString(),
+                any(byte[].class),
+                anyString()
+        );
+    }
+
+    @Test
+    void concurrentRetryForSameDocumentIsRejected() throws Exception {
+        String documentId = storeDocument(
+                "concurrent.txt",
+                "content".getBytes()
+        );
+        CountDownLatch indexingStarted = new CountDownLatch(1);
+        CountDownLatch finishIndexing = new CountDownLatch(1);
+        when(parsingService.index(anyString(), any(byte[].class), eq(documentId)))
+                .thenAnswer(invocation -> {
+                    indexingStarted.countDown();
+                    if (!finishIndexing.await(3, TimeUnit.SECONDS)) {
+                        throw new IllegalStateException("test timed out");
+                    }
+                    return new DocumentIndexResult(
+                            "INDEXED", documentId, 7, 1, 1, 1
+                    );
+                });
+
+        try (var executor = Executors.newSingleThreadExecutor()) {
+            var firstRetry = executor.submit(
+                    () -> managementService.retryIndex(documentId)
+            );
+            assertTrue(indexingStarted.await(2, TimeUnit.SECONDS));
+
+            ResponseStatusException conflict = assertThrows(
+                    ResponseStatusException.class,
+                    () -> managementService.retryIndex(documentId)
+            );
+            assertEquals(409, conflict.getStatusCode().value());
+
+            finishIndexing.countDown();
+            assertEquals(documentId, firstRetry.get(2, TimeUnit.SECONDS).documentId());
+        } finally {
+            finishIndexing.countDown();
+        }
+
+        verify(parsingService, times(1)).index(
+                anyString(),
+                any(byte[].class),
+                eq(documentId)
+        );
+        assertEquals(1, repository.count());
+    }
+
+    @Test
+    void notificationFailureDoesNotBreakSuccessfulDocumentOperation()
+            throws Exception {
+        when(parsingService.index(anyString(), any(byte[].class), anyString()))
+                .thenAnswer(invocation -> new DocumentIndexResult(
+                        "INDEXED", invocation.getArgument(2), 7, 1, 1, 1
+                ));
+        doThrow(new IllegalStateException("notification store offline"))
+                .when(notificationService)
+                .recordSafely(any(), anyString(), anyString());
+
+        mockMvc.perform(multipart("/api/documents/upload")
+                        .file(new MockMultipartFile(
+                                "file",
+                                "still-saved.txt",
+                                "text/plain",
+                                "content".getBytes()
+                        )))
+                .andExpect(status().isCreated())
+                .andExpect(jsonPath("$.indexingStatus").value("INDEXED"));
+
+        assertEquals(1, repository.count());
     }
 
     @Test

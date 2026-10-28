@@ -32,6 +32,12 @@ public class DocumentMetadata {
     private Integer chunkCount;
     private Integer indexedChunks;
 
+    @Column(length = 64)
+    private String indexingErrorCode;
+
+    @Column(length = 500)
+    private String indexingError;
+
     @Column(nullable = false, updatable = false)
     private Instant createdAt;
 
@@ -63,6 +69,8 @@ public class DocumentMetadata {
     public Long getWords() { return words; }
     public Integer getChunkCount() { return chunkCount; }
     public Integer getIndexedChunks() { return indexedChunks; }
+    public String getIndexingErrorCode() { return indexingErrorCode; }
+    public String getIndexingError() { return indexingError; }
     public Instant getCreatedAt() { return createdAt; }
 
     public void markIndexed(DocumentIndexResult result) {
@@ -71,13 +79,21 @@ public class DocumentMetadata {
         words = result.words();
         chunkCount = result.chunkCount();
         indexedChunks = result.indexedChunks();
+        indexingErrorCode = null;
+        indexingError = null;
     }
 
     public void markIndexFailed() {
+        markIndexFailed("INDEXING_FAILED", "Document indexing failed.");
+    }
+
+    public void markIndexFailed(String errorCode, String errorMessage) {
         indexingStatus = "INDEX_FAILED";
         characters = null;
         words = null;
         chunkCount = null;
         indexedChunks = null;
+        indexingErrorCode = errorCode;
+        indexingError = errorMessage;
     }
 }
